@@ -11,33 +11,22 @@ import { v4 as uuidv4 } from 'uuid';
 import Fuse from 'fuse.js';
 import { promises as fs } from 'fs';
 import * as path from 'path';
-import * as os from 'os';
 import { fileURLToPath } from 'url';
 
 import { 
   Memory, 
   MemoryEntry,
   SearchOptions, 
-  SearchResult, 
-  StorageProvider, 
-  DeepMemoryConfig,
   AddMemoryOptions 
 } from './types/index.js';
-import { LocalStorageProvider, GoogleDriveProvider } from './providers/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 export class DeepMemoryServer {
   private server: Server;
-  private storageProvider!: StorageProvider;
-  private config!: DeepMemoryConfig;
-  private configPath: string;
-  private operationQueue: Promise<any> = Promise.resolve();
 
   constructor() {
-    // Stocker la config à côté du code pour éviter les problèmes de permissions / chemin utilisateur
-    this.configPath = path.join(__dirname, 'config.json');
     this.server = new Server(
       {
         name: "deepmemory-mcp",
@@ -52,76 +41,6 @@ export class DeepMemoryServer {
 
     this.setupTools();
     this.setupHandlers();
-  }
-
-  private async loadConfig(): Promise<void> {
-    try {
-      console.error("Loading configuration from:", this.configPath);
-      const configData = await fs.readFile(this.configPath, 'utf8');
-      this.config = JSON.parse(configData);
-      console.error("Configuration loaded:", this.config.storage.type);
-    } catch (error) {
-      console.error("Config not found, creating default config in code directory");
-      this.config = {
-        storage: {
-          type: 'local',
-          // Chemin du fichier mémoire dans le même dossier que le code (dist au runtime)
-          localPath: path.join(__dirname, 'memory.json')
-        },
-        maxEntries: 10000,
-        autoCleanup: false,
-        cleanupThreshold: 8000
-      };
-      await this.saveConfig();
-    }
-
-    // Forcer le localPath si storage local et absent ou ancien format
-    if (this.config.storage.type === 'local') {
-      if (!this.config.storage.localPath || this.config.storage.localPath.includes('.deepmemory')) {
-        this.config.storage.localPath = path.join(__dirname, 'memory.json');
-        console.error('Updated local storage path to code directory:', this.config.storage.localPath);
-        await this.saveConfig();
-      }
-    }
-
-    try {
-      await this.initializeStorageProvider();
-      console.error("Storage provider initialized");
-    } catch (error) {
-      console.error("Storage provider initialization failed:", error);
-      throw error;
-    }
-  }
-
-  private async saveConfig(): Promise<void> {
-    try {
-      await fs.mkdir(path.dirname(this.configPath), { recursive: true });
-      await fs.writeFile(this.configPath, JSON.stringify(this.config, null, 2), 'utf8');
-    } catch (error) {
-      console.error('Failed to save config:', error);
-    }
-  }
-
-  private async initializeStorageProvider(): Promise<void> {
-    try {
-      console.error("Initializing storage provider:", this.config.storage.type);
-      
-      if (this.config.storage.type === 'googledrive') {
-        if (!this.config.storage.googleDrive) {
-          throw new Error('Google Drive configuration is missing');
-        }
-        this.storageProvider = new GoogleDriveProvider(this.config.storage.googleDrive);
-      } else {
-        this.storageProvider = new LocalStorageProvider(this.config.storage.localPath);
-      }
-
-      console.error("Storage provider created, initializing...");
-      await this.storageProvider.initialize();
-      console.error("Storage provider initialized successfully");
-    } catch (error) {
-      console.error("Storage provider initialization error:", error);
-      throw error;
-    }
   }
 
   private setupTools(): void {
@@ -220,55 +139,6 @@ export class DeepMemoryServer {
             }
           }
         }
-      },
-      {
-        name: "configure_storage",
-        description: "Configure storage provider (local or Google Drive)",
-        inputSchema: {
-          type: "object",
-          properties: {
-            type: {
-              type: "string",
-              enum: ["local", "googledrive"],
-              description: "Storage type to configure"
-            },
-            local_path: {
-              type: "string",
-              description: "Custom local storage path (optional)"
-            },
-            google_client_id: {
-              type: "string",
-              description: "Google OAuth2 client ID"
-            },
-            google_client_secret: {
-              type: "string",
-              description: "Google OAuth2 client secret"
-            },
-            google_auth_code: {
-              type: "string",
-              description: "Google OAuth2 authorization code"
-            }
-          },
-          required: ["type"]
-        }
-      },
-      {
-        name: "get_google_auth_url",
-        description: "Get Google OAuth2 authorization URL for Drive access",
-        inputSchema: {
-          type: "object",
-          properties: {
-            client_id: {
-              type: "string",
-              description: "Google OAuth2 client ID"
-            },
-            client_secret: {
-              type: "string", 
-              description: "Google OAuth2 client secret"
-            }
-          },
-          required: ["client_id", "client_secret"]
-        }
       }
     ];
 
@@ -279,38 +149,18 @@ export class DeepMemoryServer {
 
   private setupHandlers(): void {
     this.server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest) => {
-      console.error(`[${Date.now()}] ===== HANDLER APPELÉ POUR: ${request.params.name} =====`);
+      console.error(`[${Date.now()}] Handler called for: ${request.params.name}`);
       
       const { name, arguments: args } = request.params;
 
-      // TEST IMMEDIAT - RETOUR DIRECT SANS RIEN FAIRE
-      if (name === "add_memory") {
-        console.error(`[${Date.now()}] ===== RETOUR IMMEDIAT POUR add_memory =====`);
-        return {
-          content: [
-            {
-              type: "text",
-              text: `TEST: Handler appelé avec succès pour add_memory à ${new Date().toISOString()}`
-            }
-          ]
-        };
-      }
-
       try {
-        // Pour les autres outils, charger la config normalement
-        if (!this.storageProvider) {
-          await this.loadConfig();
-        }
-
         switch (name) {
+          case "add_memory":
+            return await this.handleAddMemory(args as any);
           case "search_memory":
             return await this.handleSearchMemory(args as any);
           case "get_memories":
             return await this.handleGetMemories(args as any);
-          case "configure_storage":
-            return await this.handleConfigureStorage(args as any);
-          case "get_google_auth_url":
-            return await this.handleGetGoogleAuthUrl(args as any);
           default:
             throw new Error(`Unknown tool: ${name}`);
         }
@@ -329,21 +179,42 @@ export class DeepMemoryServer {
       }
     });
 
-    // Ajouter une gestion globale des erreurs pour éviter que le serveur se ferme
+    // Global error handling
     process.on('uncaughtException', (error) => {
       console.error('Uncaught Exception:', error);
       console.error('Stack:', error.stack);
-      // Ne pas fermer le processus
     });
 
     process.on('unhandledRejection', (reason, promise) => {
       console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-      // Ne pas fermer le processus
     });
   }
 
+  private async loadMemoryFromFile(): Promise<Memory> {
+    const filePath = path.join(__dirname, 'memory.json');
+    try {
+      const fileContent = await fs.readFile(filePath, 'utf8');
+      const data = JSON.parse(fileContent);
+      return {
+        ...data,
+        lastModified: new Date(data.lastModified),
+        entries: data.entries.map((entry: any) => ({
+          ...entry,
+          timestamp: new Date(entry.timestamp),
+          lastAccessed: new Date(entry.lastAccessed)
+        }))
+      };
+    } catch (e) {
+      return {
+        entries: [],
+        totalEntries: 0,
+        lastModified: new Date()
+      };
+    }
+  }
+
   private async handleAddMemory(args: AddMemoryOptions & { content: string }): Promise<any> {
-    console.error(`[${Date.now()}] ==> handleAddMemory DEBUT`);
+    console.error(`[${Date.now()}] handleAddMemory started`);
     
     try {
       // Create the new entry
@@ -359,39 +230,41 @@ export class DeepMemoryServer {
         metadata: args.metadata || {}
       };
 
-      console.error(`[${Date.now()}] ==> Entry créée: ${newEntry.id}`);
+      console.error(`[${Date.now()}] Created entry with ID: ${newEntry.id}`);
 
-      // ECRITURE DIRECTE BRUTALE - PAS DE COMPLICATIONS
+      // Direct file writing - simple and reliable
       const filePath = path.join(__dirname, 'memory.json');
-      console.error(`[${Date.now()}] ==> Chemin fichier: ${filePath}`);
+      console.error(`[${Date.now()}] Writing to file: ${filePath}`);
       
-      // Lire le fichier existant ou créer vide
-      let existingData: { entries: any[], totalEntries: number, lastModified: Date } = { entries: [], totalEntries: 0, lastModified: new Date() };
+      // Read existing file or create empty structure
+      let existingData: { entries: any[], totalEntries: number, lastModified: string } = { 
+        entries: [], 
+        totalEntries: 0, 
+        lastModified: new Date().toISOString() 
+      };
       try {
         const fileContent = await fs.readFile(filePath, 'utf8');
         existingData = JSON.parse(fileContent);
-        console.error(`[${Date.now()}] ==> Fichier lu, ${existingData.entries.length} entrées existantes`);
+        console.error(`[${Date.now()}] Loaded ${existingData.entries.length} existing entries`);
       } catch (e) {
-        console.error(`[${Date.now()}] ==> Fichier n'existe pas, création`);
+        console.error(`[${Date.now()}] File doesn't exist, creating new one`);
       }
 
-      // Ajouter la nouvelle entrée
+      // Add new entry
       existingData.entries.push({
         ...newEntry,
         timestamp: newEntry.timestamp.toISOString(),
         lastAccessed: newEntry.lastAccessed.toISOString()
       });
       existingData.totalEntries = existingData.entries.length;
-      existingData.lastModified = new Date();
+      existingData.lastModified = new Date().toISOString();
 
-      console.error(`[${Date.now()}] ==> Ajout effectué, ${existingData.entries.length} entrées total`);
+      console.error(`[${Date.now()}] Added entry, total: ${existingData.entries.length}`);
 
-      // ECRIRE DIRECTEMENT
+      // Write file
       const jsonData = JSON.stringify(existingData, null, 2);
-      console.error(`[${Date.now()}] ==> JSON créé, ${jsonData.length} caractères`);
-      
       await fs.writeFile(filePath, jsonData, 'utf8');
-      console.error(`[${Date.now()}] ==> FICHIER ECRIT AVEC SUCCES !`);
+      console.error(`[${Date.now()}] File written successfully`);
 
       return {
         content: [
@@ -403,12 +276,12 @@ export class DeepMemoryServer {
       };
 
     } catch (error) {
-      console.error(`[${Date.now()}] ==> ERREUR:`, error);
+      console.error(`[${Date.now()}] Error in handleAddMemory:`, error);
       return {
         content: [
           {
             type: "text",
-            text: `ERREUR: ${error instanceof Error ? error.message : String(error)}`
+            text: `Error saving memory: ${error instanceof Error ? error.message : String(error)}`
           }
         ],
         isError: true
@@ -419,11 +292,8 @@ export class DeepMemoryServer {
   private async handleSearchMemory(args: SearchOptions): Promise<any> {
     try {
       const startTime = Date.now();
-      const memory = await this.storageProvider.loadMemory();
+      const memory = await this.loadMemoryFromFile();
       let filteredEntries = memory.entries;
-
-      // Ne pas modifier les données lors d'une recherche simple
-      // Seulement filtrer et trier sans toucher aux accessCount/lastAccessed
 
       if (args.tags && args.tags.length > 0) {
         filteredEntries = filteredEntries.filter(entry => 
@@ -451,7 +321,6 @@ export class DeepMemoryServer {
         });
         
         const searchResults = fuse.search(args.query);
-        // Ne pas modifier lastAccessed et accessCount lors de la recherche
         filteredEntries = searchResults.map((result: any) => result.item);
       }
 
@@ -485,8 +354,6 @@ export class DeepMemoryServer {
       const limit = args.limit || 10;
       const results = filteredEntries.slice(0, limit);
       
-      // Ne pas sauvegarder lors d'une recherche - cela élimine la boucle infinie !
-
       const searchTime = Date.now() - startTime;
       
       const resultText = results.length > 0 
@@ -505,199 +372,89 @@ export class DeepMemoryServer {
       };
     } catch (error) {
       console.error('Error in handleSearchMemory:', error);
-      throw new Error(`Failed to search memories: ${error instanceof Error ? error.message : String(error)}`);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error searching memories: ${error instanceof Error ? error.message : String(error)}`
+          }
+        ],
+        isError: true
+      };
     }
   }
 
   private async handleGetMemories(args: { limit?: number; include_stats?: boolean }): Promise<any> {
-    const memory = await this.storageProvider.loadMemory();
-    const limit = args.limit || 20;
-    
-    const recentMemories = memory.entries
-      .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
-      .slice(0, limit);
-
-    let result = `Recent ${recentMemories.length} memories:\n\n`;
-    
-    result += recentMemories.map((entry, index) => 
-      `${index + 1}. [${entry.importance}/10] ${entry.content.substring(0, 150)}${entry.content.length > 150 ? '...' : ''}\n   Tags: ${entry.tags.join(', ')}\n   Created: ${entry.timestamp.toLocaleString()}`
-    ).join('\n\n');
-
-    if (args.include_stats) {
-      const totalEntries = memory.totalEntries;
-      const avgImportance = memory.entries.reduce((sum, entry) => sum + entry.importance, 0) / totalEntries;
-      const tagCounts = memory.entries.reduce((counts, entry) => {
-        entry.tags.forEach(tag => counts[tag] = (counts[tag] || 0) + 1);
-        return counts;
-      }, {} as Record<string, number>);
-      
-      const topTags = Object.entries(tagCounts)
-        .sort(([,a], [,b]) => b - a)
-        .slice(0, 10)
-        .map(([tag, count]) => `${tag} (${count})`)
-        .join(', ');
-
-      result += `\n\nStatistics:\n- Total memories: ${totalEntries}\n- Average importance: ${avgImportance.toFixed(1)}\n- Storage: ${this.storageProvider.getStorageInfo()}\n- Top tags: ${topTags}`;
-    }
-
-    return {
-      content: [
-        {
-          type: "text",
-          text: result
-        }
-      ]
-    };
-  }
-
-  private async handleConfigureStorage(args: any): Promise<any> {
     try {
-      console.error("Configuring storage with args:", JSON.stringify(args));
+      const memory = await this.loadMemoryFromFile();
+      const limit = args.limit || 20;
       
-      if (args.type === 'local') {
-        console.error("Setting up local storage configuration");
-        this.config.storage = {
-          type: 'local',
-          localPath: args.local_path
-        };
-        
-        console.error("Saving config...");
-        await this.saveConfig();
-        console.error("Initializing storage provider...");
-        await this.initializeStorageProvider();
-        console.error("Local storage configured successfully");
-        
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Local storage configured successfully.\nStorage path: ${this.storageProvider.getStorageInfo()}`
-            }
-          ]
-        };
-      } else if (args.type === 'googledrive') {
-      if (!args.google_client_id || !args.google_client_secret) {
-        throw new Error('Google Drive configuration requires client_id and client_secret');
-      }
+      const recentMemories = memory.entries
+        .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
+        .slice(0, limit);
 
-      if (!args.google_auth_code) {
-        const tempProvider = new GoogleDriveProvider({
-          clientId: args.google_client_id,
-          clientSecret: args.google_client_secret
-        });
-        
-        const authUrl = tempProvider.getAuthUrl();
-        
-        return {
-          content: [
-            {
-              type: "text",
-              text: `To configure Google Drive storage:\n1. Visit this URL: ${authUrl}\n2. Authorize the application\n3. Copy the authorization code\n4. Run this command again with the google_auth_code parameter`
-            }
-          ]
-        };
-      }
-
-      const tempProvider = new GoogleDriveProvider({
-        clientId: args.google_client_id,
-        clientSecret: args.google_client_secret
-      });
-
-      const tokens = await tempProvider.exchangeCodeForTokens(args.google_auth_code);
+      let result = `Recent ${recentMemories.length} memories:\n\n`;
       
-      this.config.storage = {
-        type: 'googledrive',
-        googleDrive: {
-          clientId: args.google_client_id,
-          clientSecret: args.google_client_secret,
-          refreshToken: tokens.refreshToken
-        }
-      };
+      result += recentMemories.map((entry, index) => 
+        `${index + 1}. [${entry.importance}/10] ${entry.content.substring(0, 150)}${entry.content.length > 150 ? '...' : ''}\n   Tags: ${entry.tags.join(', ')}\n   Created: ${entry.timestamp.toLocaleString()}`
+      ).join('\n\n');
 
-      await this.saveConfig();
-      await this.initializeStorageProvider();
+      if (args.include_stats) {
+        const totalEntries = memory.totalEntries;
+        const avgImportance = memory.entries.length > 0 
+          ? memory.entries.reduce((sum, entry) => sum + entry.importance, 0) / memory.entries.length 
+          : 0;
+        const tagCounts = memory.entries.reduce((counts, entry) => {
+          entry.tags.forEach(tag => counts[tag] = (counts[tag] || 0) + 1);
+          return counts;
+        }, {} as Record<string, number>);
+        
+        const topTags = Object.entries(tagCounts)
+          .sort(([,a], [,b]) => b - a)
+          .slice(0, 10)
+          .map(([tag, count]) => `${tag} (${count})`)
+          .join(', ');
+
+        const filePath = path.join(__dirname, 'memory.json');
+        result += `\n\nStatistics:\n- Total memories: ${totalEntries}\n- Average importance: ${avgImportance.toFixed(1)}\n- Storage: Local storage at: ${filePath}\n- Top tags: ${topTags}`;
+      }
 
       return {
         content: [
           {
             type: "text",
-            text: `Google Drive storage configured successfully.\n${this.storageProvider.getStorageInfo()}`
+            text: result
           }
         ]
       };
-    }
-
-    throw new Error('Invalid storage type. Use "local" or "googledrive"');
     } catch (error) {
-      console.error("Error in handleConfigureStorage:", error);
-      throw error;
+      console.error('Error in handleGetMemories:', error);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error retrieving memories: ${error instanceof Error ? error.message : String(error)}`
+          }
+        ],
+        isError: true
+      };
     }
-  }
-
-  private async handleGetGoogleAuthUrl(args: { client_id: string; client_secret: string }): Promise<any> {
-    const provider = new GoogleDriveProvider({
-      clientId: args.client_id,
-      clientSecret: args.client_secret
-    });
-
-    const authUrl = provider.getAuthUrl();
-
-    return {
-      content: [
-        {
-          type: "text",
-          text: `Google OAuth2 Authorization URL:\n${authUrl}\n\nVisit this URL, authorize the application, and copy the authorization code to complete the setup.`
-        }
-      ]
-    };
-  }
-
-  private async cleanupMemories(memory: Memory): Promise<void> {
-    const threshold = this.config.cleanupThreshold || 8000;
-    if (memory.entries.length <= threshold) return;
-
-    console.error(`Cleaning up memories: ${memory.entries.length} -> ${threshold}`);
-
-    memory.entries.sort((a, b) => {
-      // Score plus élevé = plus important à garder
-      // Plus l'importance est élevée, plus l'accessCount est élevé, moins le temps depuis dernier accès est long = meilleur score
-      const daysSinceLastAccessA = (Date.now() - a.lastAccessed.getTime()) / (1000 * 60 * 60 * 24);
-      const daysSinceLastAccessB = (Date.now() - b.lastAccessed.getTime()) / (1000 * 60 * 60 * 24);
-      
-      // Score: importance (50%) + accès fréquents (30%) + récence (20%)
-      // Plus le score est élevé, plus l'entrée est importante
-      const scoreA = a.importance * 0.5 + a.accessCount * 0.3 + (1 / (1 + daysSinceLastAccessA)) * 0.2;
-      const scoreB = b.importance * 0.5 + b.accessCount * 0.3 + (1 / (1 + daysSinceLastAccessB)) * 0.2;
-      
-      return scoreB - scoreA; // Tri décroissant (meilleurs scores en premier)
-    });
-
-    const toRemove = memory.entries.length - threshold;
-    console.error(`Removing ${toRemove} oldest/least important memories`);
-    
-    memory.entries = memory.entries.slice(0, threshold);
-    memory.totalEntries = memory.entries.length;
   }
 
   async start(): Promise<void> {
     try {
       console.error("DeepMemory MCP Server starting...");
-      await this.loadConfig();
-      console.error("Configuration loaded successfully");
       
       const transport = new StdioServerTransport();
       
-      // Gérer les erreurs de transport plus robustement
       transport.onclose = () => {
         console.error("Transport connection closed");
       };
       
       transport.onerror = (error) => {
         console.error("Transport error:", error);
-        // Ne pas relancer l'erreur pour éviter la fermeture
       };
 
-      // Gérer les erreurs STDIN/STDOUT
       process.stdin.on('error', (error) => {
         console.error('STDIN error:', error);
       });
@@ -713,8 +470,7 @@ export class DeepMemoryServer {
       if (error instanceof Error && error.stack) {
         console.error("Stack trace:", error.stack);
       }
-      // Ne pas relancer l'erreur pour éviter la fermeture
-      console.error("Server will attempt to continue despite the error...");
+      process.exit(1);
     }
   }
 }
