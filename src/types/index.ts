@@ -10,12 +10,6 @@ export interface MemoryEntry {
   metadata?: Record<string, any>;
 }
 
-export interface Memory {
-  entries: MemoryEntry[];
-  totalEntries: number;
-  lastModified: Date;
-}
-
 export interface SearchOptions {
   query?: string;
   tags?: string[];
@@ -32,33 +26,8 @@ export interface SearchResult {
   searchTime: number;
 }
 
-export interface StorageConfig {
-  type: 'local' | 'googledrive';
-  localPath?: string;
-  googleDrive?: {
-    clientId: string;
-    clientSecret: string;
-    refreshToken?: string;
-    folderId?: string;
-  };
-}
-
-export interface DeepMemoryConfig {
-  storage: StorageConfig;
-  maxEntries?: number;
-  autoCleanup?: boolean;
-  cleanupThreshold?: number;
-}
-
-export interface StorageProvider {
-  initialize(): Promise<void>;
-  saveMemory(memory: Memory): Promise<void>;
-  loadMemory(): Promise<Memory>;
-  isConfigured(): boolean;
-  getStorageInfo(): string;
-}
-
 export interface AddMemoryOptions {
+  content: string;
   tags?: string[];
   context?: string;
   importance?: number;

@@ -7,24 +7,47 @@ import {
   Tool,
   CallToolRequest,
 } from "@modelcontextprotocol/sdk/types.js";
-import { v4 as uuidv4 } from 'uuid';
-import Fuse from 'fuse.js';
-import { promises as fs } from 'fs';
+import { SQLiteProvider } from './providers/SQLiteProvider.js';
+import { SearchOptions, MemoryEntry } from './types/index.js';
 import * as path from 'path';
+import { promises as fs } from 'fs';
 import { fileURLToPath } from 'url';
+import * as http from 'http';
+import * as os from 'os';
 
-import { 
-  Memory, 
-  MemoryEntry,
-  SearchOptions, 
-  AddMemoryOptions 
-} from './types/index.js';
+declare global {
+  var deepMemoryServer: DeepMemoryServer | undefined;
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 export class DeepMemoryServer {
   private server: Server;
+  private sqliteProvider: SQLiteProvider;
+  private sqliteReady: boolean = false;
+  private requestTimeoutMs: number = 10000;
+  private queuePath: string;
+  private httpPort: number;
+  private httpServer: http.Server | null = null;
+  private queueProcessing = false;
+
+  private withTimeout<T>(p: Promise<T>, ms?: number): Promise<T> {
+    const timeout = ms ?? this.requestTimeoutMs;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error(`Operation timed out after ${timeout}ms`));
+      }, timeout);
+
+      p.then((res) => {
+        clearTimeout(timer);
+        resolve(res);
+      }).catch((err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+  }
 
   constructor() {
     this.server = new Server(
@@ -38,6 +61,16 @@ export class DeepMemoryServer {
         },
       }
     );
+
+    const userHome = os.homedir();
+    const deepMemoryDir = path.join(userHome, '.deepmemory');
+    const dbPath = path.join(deepMemoryDir, 'deepmemory.db');
+    
+    fs.mkdir(deepMemoryDir, { recursive: true }).catch(() => {});
+    
+    this.sqliteProvider = new SQLiteProvider(dbPath);
+    this.queuePath = path.join(deepMemoryDir, 'queue.jsonl');
+    this.httpPort = Number(process.env.DEEP_MEMORY_HTTP_PORT) || 6789;
 
     this.setupTools();
     this.setupHandlers();
@@ -110,378 +143,489 @@ export class DeepMemoryServer {
             limit: {
               type: "number",
               description: "Maximum number of results to return",
-              default: 10
+              default: 20
             },
             sort_by: {
               type: "string",
               enum: ["timestamp", "importance", "accessCount", "lastAccessed"],
-              description: "Sort results by",
-              default: "importance"
+              description: "Sort results by this field",
+              default: "timestamp"
+            },
+            sort_order: {
+              type: "string",
+              enum: ["asc", "desc"],
+              description: "Sort order",
+              default: "desc"
             }
-          }
+          },
+          required: []
         }
       },
       {
         name: "get_memories",
-        description: "Get recent memories or memory statistics",
+        description: "Get recent memories or all memories with optional filtering",
         inputSchema: {
           type: "object",
           properties: {
             limit: {
               type: "number",
-              description: "Number of recent memories to retrieve",
+              description: "Number of memories to retrieve",
               default: 20
             },
-            include_stats: {
-              type: "boolean",
-              description: "Include memory statistics",
-              default: false
+            context: {
+              type: "string",
+              description: "Filter by context"
+            },
+            min_importance: {
+              type: "number",
+              description: "Minimum importance level",
+              minimum: 1,
+              maximum: 10
             }
-          }
+          },
+          required: []
+        }
+      },
+      {
+        name: "load_all_memory",
+        description: "Load all memories from the database without any filtering or limits",
+        inputSchema: {
+          type: "object",
+          properties: {},
+          required: []
+        }
+      },
+      {
+        name: "get_memory_stats",
+        description: "Get statistics about stored memories",
+        inputSchema: {
+          type: "object",
+          properties: {},
+          required: []
         }
       }
     ];
 
-    this.server.setRequestHandler(ListToolsRequestSchema, async () => {
-      return { tools };
-    });
+    this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
+      tools: tools
+    }));
   }
 
   private setupHandlers(): void {
     this.server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest) => {
-      console.error(`[${Date.now()}] Handler called for: ${request.params.name}`);
-      
       const { name, arguments: args } = request.params;
 
       try {
+        if (!args || typeof args !== 'object') {
+          throw new Error('Invalid arguments provided');
+        }
+
+        if (!this.sqliteReady) {
+          if (name === 'add_memory') {
+            return await this.handleQueuedAddMemory(args);
+          }
+          
+          const maxWait = 5000;
+          const startWait = Date.now();
+          while (!this.sqliteReady && (Date.now() - startWait) < maxWait) {
+            await new Promise(resolve => setTimeout(resolve, 100));
+          }
+
+          if (!this.sqliteReady) {
+            throw new Error('Database not ready, please retry later');
+          }
+        }
+
         switch (name) {
           case "add_memory":
-            return await this.handleAddMemory(args as any);
+            return await this.handleAddMemory(args);
           case "search_memory":
-            return await this.handleSearchMemory(args as any);
+            return await this.handleSearchMemory(args);
           case "get_memories":
-            return await this.handleGetMemories(args as any);
+            return await this.handleGetMemories(args);
+          case "load_all_memory":
+            return await this.handleLoadAllMemory();
+          case "get_memory_stats":
+            return await this.handleGetStats();
           default:
             throw new Error(`Unknown tool: ${name}`);
         }
       } catch (error) {
-        console.error(`Error handling tool ${name}:`, error);
-        console.error(`Stack trace:`, error instanceof Error ? error.stack : 'No stack trace');
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        console.error(`Error in ${name}:`, errorMessage);
+
         return {
           content: [
             {
               type: "text",
-              text: `Error calling tool ${name}: ${error instanceof Error ? error.message : String(error)}`
+              text: `Error: ${errorMessage}`
             }
-          ],
-          isError: true
+          ]
         };
       }
     });
-
-    // Global error handling
-    process.on('uncaughtException', (error) => {
-      console.error('Uncaught Exception:', error);
-      console.error('Stack:', error.stack);
-    });
-
-    process.on('unhandledRejection', (reason, promise) => {
-      console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-    });
   }
 
-  private async loadMemoryFromFile(): Promise<Memory> {
-    const filePath = path.join(__dirname, 'memory.json');
+  private async handleAddMemory(args: any) {
+    if (!args || typeof args !== 'object') {
+      throw new Error('Invalid arguments object');
+    }
+
+    const { content, tags = [], context = "", importance = 5, metadata = {} } = args;
+
+    if (!content || typeof content !== 'string' || content.trim().length === 0) {
+      throw new Error('Content is required and must be a non-empty string');
+    }
+
+    if (!Array.isArray(tags)) {
+      throw new Error('Tags must be an array');
+    }
+
+    const validImportance = Math.max(1, Math.min(10, Number(importance) || 5));
+    if (isNaN(validImportance)) {
+      throw new Error('Importance must be a number between 1 and 10');
+    }
+
+    const entry = await this.withTimeout(
+      this.sqliteProvider.addMemory({
+        content: content.trim(),
+        tags: tags.filter(tag => typeof tag === 'string' && tag.trim().length > 0),
+        context: String(context).trim(),
+        importance: validImportance,
+        metadata: metadata || {}
+      })
+    );
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Memory added successfully with ID: ${entry.id}`
+        }
+      ]
+    };
+  }
+
+  private async handleQueuedAddMemory(args: any) {
     try {
-      const fileContent = await fs.readFile(filePath, 'utf8');
-      const data = JSON.parse(fileContent);
-      return {
-        ...data,
-        lastModified: new Date(data.lastModified),
-        entries: data.entries.map((entry: any) => ({
-          ...entry,
-          timestamp: new Date(entry.timestamp),
-          lastAccessed: new Date(entry.lastAccessed)
-        }))
+      const queueItem = {
+        timestamp: new Date().toISOString(),
+        params: {
+          name: 'add_memory',
+          arguments: args
+        }
       };
-    } catch (e) {
+
+      await fs.appendFile(this.queuePath, JSON.stringify(queueItem) + '\n', 'utf8');
+
       return {
-        entries: [],
-        totalEntries: 0,
-        lastModified: new Date()
+        content: [
+          {
+            type: "text",
+            text: "Memory queued for addition (database initializing). It will be processed shortly."
+          }
+        ]
       };
+    } catch (error) {
+      throw new Error(`Failed to queue memory: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
-  private async handleAddMemory(args: AddMemoryOptions & { content: string }): Promise<any> {
-    console.error(`[${Date.now()}] handleAddMemory started`);
+  private async handleSearchMemory(args: any) {
+    const options: SearchOptions = {
+      query: args.query,
+      tags: Array.isArray(args.tags) ? args.tags : undefined,
+      contextFilter: args.context,
+      importanceThreshold: args.importance_threshold,
+      limit: Math.max(1, Math.min(100, Number(args.limit) || 20)),
+      sortBy: args.sort_by || 'timestamp',
+      sortOrder: args.sort_order || 'desc'
+    };
+
+    const result = await this.withTimeout(
+      this.sqliteProvider.searchMemories(options)
+    );
+
+    if (result.entries.length === 0) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: "No memories found matching your criteria."
+          }
+        ]
+      };
+    }
+
+    const formattedEntries = result.entries.map(entry => {
+      const tagsStr = entry.tags.length > 0 ? ` [${entry.tags.join(', ')}]` : '';
+      const contextStr = entry.context ? ` (${entry.context})` : '';
+      const importanceStr = `★${entry.importance}`;
+      
+      return `${importanceStr}${contextStr}${tagsStr}\n${entry.content}\n---`;
+    }).join('\n');
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Found ${result.totalFound} memories (searched in ${result.searchTime}ms):\n\n${formattedEntries}`
+        }
+      ]
+    };
+  }
+
+  private async handleGetMemories(args: any) {
+    const limit = Math.max(1, Math.min(100, Number(args.limit) || 20));
+    
+    const entries = await this.withTimeout(
+      this.sqliteProvider.getRecentMemories(limit)
+    );
+
+    if (entries.length === 0) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: "No memories found."
+          }
+        ]
+      };
+    }
+
+    const formattedEntries = entries.map(entry => {
+      const tagsStr = entry.tags.length > 0 ? ` [${entry.tags.join(', ')}]` : '';
+      const contextStr = entry.context ? ` (${entry.context})` : '';
+      const importanceStr = `★${entry.importance}`;
+      const dateStr = entry.timestamp.toLocaleDateString();
+      
+      return `${importanceStr}${contextStr}${tagsStr} - ${dateStr}\n${entry.content}\n---`;
+    }).join('\n');
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Recent ${entries.length} memories:\n\n${formattedEntries}`
+        }
+      ]
+    };
+  }
+
+  private async handleGetStats() {
+    const stats = await this.withTimeout(
+      this.sqliteProvider.getStats()
+    );
+
+    const lastModifiedStr = stats.lastModified 
+      ? stats.lastModified.toLocaleString()
+      : 'Never';
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Memory Statistics:
+- Total entries: ${stats.totalEntries}
+- Last modified: ${lastModifiedStr}
+- Storage: ${this.sqliteProvider.getStorageInfo()}`
+        }
+      ]
+    };
+  }
+
+  private async handleLoadAllMemory() {
+    const entries = await this.withTimeout(
+      this.sqliteProvider.getAllMemories()
+    );
+
+    if (entries.length === 0) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: "No memories found in the database."
+          }
+        ]
+      };
+    }
+
+    const formattedEntries = entries.map(entry => {
+      const tagsStr = entry.tags.length > 0 ? ` [${entry.tags.join(', ')}]` : '';
+      const contextStr = entry.context ? ` (${entry.context})` : '';
+      const importanceStr = `★${entry.importance}`;
+      const dateStr = entry.timestamp.toLocaleDateString();
+      
+      return `${importanceStr}${contextStr}${tagsStr} - ${dateStr}\n${entry.content}\n---`;
+    }).join('\n');
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: `All ${entries.length} memories:\n\n${formattedEntries}`
+        }
+      ]
+    };
+  }
+
+  private async drainQueue(): Promise<void> {
+    if (this.queueProcessing) {
+      return;
+    }
+
+    this.queueProcessing = true;
     
     try {
-      // Create the new entry
-      const newEntry: MemoryEntry = {
-        id: uuidv4(),
-        content: args.content,
-        tags: args.tags || [],
-        context: args.context || '',
-        importance: args.importance || 5,
-        timestamp: new Date(),
-        lastAccessed: new Date(),
-        accessCount: 0,
-        metadata: args.metadata || {}
-      };
+      const exists = await fs.access(this.queuePath).then(() => true).catch(() => false);
+      if (!exists) return;
 
-      console.error(`[${Date.now()}] Created entry with ID: ${newEntry.id}`);
+      const data = await fs.readFile(this.queuePath, 'utf8');
+      if (!data.trim()) return;
 
-      // Direct file writing - simple and reliable
-      const filePath = path.join(__dirname, 'memory.json');
-      console.error(`[${Date.now()}] Writing to file: ${filePath}`);
-      
-      // Read existing file or create empty structure
-      let existingData: { entries: any[], totalEntries: number, lastModified: string } = { 
-        entries: [], 
-        totalEntries: 0, 
-        lastModified: new Date().toISOString() 
-      };
-      try {
-        const fileContent = await fs.readFile(filePath, 'utf8');
-        existingData = JSON.parse(fileContent);
-        console.error(`[${Date.now()}] Loaded ${existingData.entries.length} existing entries`);
-      } catch (e) {
-        console.error(`[${Date.now()}] File doesn't exist, creating new one`);
-      }
+      const lines = data.split(/\r?\n/).filter(Boolean);
+      let processedCount = 0;
 
-      // Add new entry
-      existingData.entries.push({
-        ...newEntry,
-        timestamp: newEntry.timestamp.toISOString(),
-        lastAccessed: newEntry.lastAccessed.toISOString()
-      });
-      existingData.totalEntries = existingData.entries.length;
-      existingData.lastModified = new Date().toISOString();
-
-      console.error(`[${Date.now()}] Added entry, total: ${existingData.entries.length}`);
-
-      // Write file
-      const jsonData = JSON.stringify(existingData, null, 2);
-      await fs.writeFile(filePath, jsonData, 'utf8');
-      console.error(`[${Date.now()}] File written successfully`);
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Memory successfully saved with ID: ${newEntry.id} (${existingData.entries.length} total entries)`
+      for (const line of lines) {
+        try {
+          const req = JSON.parse(line);
+          if (req?.params?.name === 'add_memory') {
+            const args = req.params.arguments || {};
+            await this.sqliteProvider.addMemory({
+              content: args.content,
+              tags: Array.isArray(args.tags) ? args.tags : [],
+              context: String(args.context || ''),
+              importance: Number(args.importance) || 5,
+              metadata: args.metadata || {}
+            });
+            processedCount++;
           }
-        ]
-      };
-
-    } catch (error) {
-      console.error(`[${Date.now()}] Error in handleAddMemory:`, error);
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error saving memory: ${error instanceof Error ? error.message : String(error)}`
-          }
-        ],
-        isError: true
-      };
-    }
-  }
-
-  private async handleSearchMemory(args: SearchOptions): Promise<any> {
-    try {
-      const startTime = Date.now();
-      const memory = await this.loadMemoryFromFile();
-      let filteredEntries = memory.entries;
-
-      if (args.tags && args.tags.length > 0) {
-        filteredEntries = filteredEntries.filter(entry => 
-          args.tags!.some(tag => entry.tags.includes(tag))
-        );
-      }
-
-      if (args.contextFilter) {
-        filteredEntries = filteredEntries.filter(entry => 
-          entry.context.toLowerCase().includes(args.contextFilter!.toLowerCase())
-        );
-      }
-
-      if (args.importanceThreshold) {
-        filteredEntries = filteredEntries.filter(entry => 
-          entry.importance >= args.importanceThreshold!
-        );
-      }
-
-      if (args.query) {
-        const fuse = new Fuse(filteredEntries, {
-          keys: ['content', 'tags', 'context'],
-          threshold: 0.3,
-          includeScore: true
-        });
-        
-        const searchResults = fuse.search(args.query);
-        filteredEntries = searchResults.map((result: any) => result.item);
-      }
-
-      const sortBy = args.sortBy || 'importance';
-      const sortOrder = args.sortOrder || 'desc';
-      
-      filteredEntries.sort((a, b) => {
-        let aVal: any, bVal: any;
-        
-        switch (sortBy) {
-          case 'timestamp':
-            aVal = a.timestamp.getTime();
-            bVal = b.timestamp.getTime();
-            break;
-          case 'lastAccessed':
-            aVal = a.lastAccessed.getTime();
-            bVal = b.lastAccessed.getTime();
-            break;
-          case 'accessCount':
-            aVal = a.accessCount;
-            bVal = b.accessCount;
-            break;
-          default:
-            aVal = a.importance;
-            bVal = b.importance;
+        } catch (err) {
+          console.error('Failed to process queued item:', err);
         }
-        
-        return sortOrder === 'desc' ? bVal - aVal : aVal - bVal;
-      });
-
-      const limit = args.limit || 10;
-      const results = filteredEntries.slice(0, limit);
-      
-      const searchTime = Date.now() - startTime;
-      
-      const resultText = results.length > 0 
-        ? results.map((entry, index) => 
-            `${index + 1}. [${entry.importance}/10] ${entry.content.substring(0, 200)}${entry.content.length > 200 ? '...' : ''}\n   Tags: ${entry.tags.join(', ')}\n   Context: ${entry.context}\n   Created: ${entry.timestamp.toLocaleString()}`
-          ).join('\n\n')
-        : 'No memories found matching your search criteria.';
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Found ${results.length} memories (searched ${filteredEntries.length} entries in ${searchTime}ms):\n\n${resultText}`
-          }
-        ]
-      };
-    } catch (error) {
-      console.error('Error in handleSearchMemory:', error);
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error searching memories: ${error instanceof Error ? error.message : String(error)}`
-          }
-        ],
-        isError: true
-      };
-    }
-  }
-
-  private async handleGetMemories(args: { limit?: number; include_stats?: boolean }): Promise<any> {
-    try {
-      const memory = await this.loadMemoryFromFile();
-      const limit = args.limit || 20;
-      
-      const recentMemories = memory.entries
-        .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
-        .slice(0, limit);
-
-      let result = `Recent ${recentMemories.length} memories:\n\n`;
-      
-      result += recentMemories.map((entry, index) => 
-        `${index + 1}. [${entry.importance}/10] ${entry.content.substring(0, 150)}${entry.content.length > 150 ? '...' : ''}\n   Tags: ${entry.tags.join(', ')}\n   Created: ${entry.timestamp.toLocaleString()}`
-      ).join('\n\n');
-
-      if (args.include_stats) {
-        const totalEntries = memory.totalEntries;
-        const avgImportance = memory.entries.length > 0 
-          ? memory.entries.reduce((sum, entry) => sum + entry.importance, 0) / memory.entries.length 
-          : 0;
-        const tagCounts = memory.entries.reduce((counts, entry) => {
-          entry.tags.forEach(tag => counts[tag] = (counts[tag] || 0) + 1);
-          return counts;
-        }, {} as Record<string, number>);
-        
-        const topTags = Object.entries(tagCounts)
-          .sort(([,a], [,b]) => b - a)
-          .slice(0, 10)
-          .map(([tag, count]) => `${tag} (${count})`)
-          .join(', ');
-
-        const filePath = path.join(__dirname, 'memory.json');
-        result += `\n\nStatistics:\n- Total memories: ${totalEntries}\n- Average importance: ${avgImportance.toFixed(1)}\n- Storage: Local storage at: ${filePath}\n- Top tags: ${topTags}`;
       }
 
-      return {
-        content: [
-          {
-            type: "text",
-            text: result
-          }
-        ]
-      };
-    } catch (error) {
-      console.error('Error in handleGetMemories:', error);
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error retrieving memories: ${error instanceof Error ? error.message : String(error)}`
-          }
-        ],
-        isError: true
-      };
+      if (processedCount > 0) {
+        await fs.writeFile(this.queuePath, '', 'utf8');
+        console.error(`Processed ${processedCount} queued items`);
+      }
+    } finally {
+      this.queueProcessing = false;
     }
   }
 
-  async start(): Promise<void> {
+  private setupHttpFallback(): void {
+    this.httpServer = http.createServer((req, res) => {
+      res.setHeader('Content-Type', 'application/json');
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+      if (req.method === 'OPTIONS') {
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+
+      if (req.method !== 'POST') {
+        res.writeHead(405);
+        res.end(JSON.stringify({ error: 'Method not allowed' }));
+        return;
+      }
+
+      let body = '';
+      req.on('data', chunk => {
+        body += chunk.toString();
+      });
+
+      req.on('end', async () => {
+        try {
+          const request = JSON.parse(body);
+          res.writeHead(200);
+          res.end(JSON.stringify({ success: true, message: 'HTTP fallback active' }));
+        } catch (error) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: 'Invalid JSON' }));
+        }
+      });
+    });
+
+    this.httpServer.listen(this.httpPort, '127.0.0.1', () => {
+      console.error(`HTTP fallback listening on http://127.0.0.1:${this.httpPort}`);
+    });
+
+    this.httpServer.on('error', (error) => {
+      console.error('HTTP server error (non-critical):', error);
+      this.httpServer = null;
+    });
+  }
+
+  async run(): Promise<void> {
     try {
-      console.error("DeepMemory MCP Server starting...");
+      console.error("Starting DeepMemory MCP Server...");
       
+      await this.withTimeout(this.sqliteProvider.initialize(), 30000);
+      this.sqliteReady = true;
+      console.error("SQLite provider initialized");
+
+      await this.drainQueue();
+
+      this.setupHttpFallback();
+
       const transport = new StdioServerTransport();
-      
-      transport.onclose = () => {
-        console.error("Transport connection closed");
-      };
-      
-      transport.onerror = (error) => {
-        console.error("Transport error:", error);
-      };
-
-      process.stdin.on('error', (error) => {
-        console.error('STDIN error:', error);
-      });
-
-      process.stdout.on('error', (error) => {
-        console.error('STDOUT error:', error);
-      });
-      
       await this.server.connect(transport);
-      console.error("DeepMemory MCP Server running on stdio");
+      
+      console.error("DeepMemory MCP Server running");
     } catch (error) {
       console.error("Failed to start server:", error);
-      if (error instanceof Error && error.stack) {
-        console.error("Stack trace:", error.stack);
-      }
+      await this.shutdown();
       process.exit(1);
+    }
+  }
+
+  async shutdown(): Promise<void> {
+    console.error("Shutting down DeepMemory MCP Server...");
+    
+    try {
+      if (this.httpServer) {
+        await new Promise<void>((resolve) => {
+          this.httpServer!.close(() => resolve());
+        });
+        this.httpServer = null;
+      }
+
+      await this.sqliteProvider.close();
+      console.error("Server shutdown completed");
+    } catch (error) {
+      console.error("Error during shutdown:", error);
     }
   }
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+process.on('SIGINT', async () => {
+  console.error('Received SIGINT, shutting down gracefully...');
+  if (globalThis.deepMemoryServer) {
+    await globalThis.deepMemoryServer.shutdown();
+  }
+  process.exit(0);
+});
+
+process.on('SIGTERM', async () => {
+  console.error('Received SIGTERM, shutting down gracefully...');
+  if (globalThis.deepMemoryServer) {
+    await globalThis.deepMemoryServer.shutdown();
+  }
+  process.exit(0);
+});
+
+const isMainModule = process.argv[1] && (
+  import.meta.url === `file://${process.argv[1]}` ||
+  import.meta.url.endsWith(process.argv[1].replace(/\\/g, '/')) ||
+  process.argv[1].endsWith('index.js')
+);
+
+if (isMainModule) {
   const server = new DeepMemoryServer();
-  server.start().catch((error) => {
-    console.error("Server error:", error);
-    if (error.stack) {
-      console.error("Stack trace:", error.stack);
-    }
-    process.exit(1);
-  });
+  globalThis.deepMemoryServer = server;
+  server.run().catch(console.error);
 }

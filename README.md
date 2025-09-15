@@ -1,14 +1,16 @@
 # DeepMemory MCP Server
 
-A Model Context Protocol (MCP) server for long-term memory management, allowing AI models to store, retrieve, and search information across conversations. Supports both local file storage and Google Drive cloud storage.
+A Model Context Protocol (MCP) server for long-term memory management with SQLite storage, allowing AI models to store, retrieve, and search information across conversations with reliable persistence and fast performance.
 
 ## Features
 
 - **Long-term Memory**: Store and retrieve information across conversation sessions
-- **Intelligent Search**: Fuzzy search with Fuse.js for finding relevant memories
-- **Dual Storage**: Choose between local file storage or Google Drive cloud storage
-- **Memory Organization**: Tag-based categorization and importance scoring
-- **Smart Cleanup**: Automatic memory management based on importance and usage
+- **SQLite Storage**: Fast, reliable database storage with automatic indexing
+- **Intelligent Search**: Advanced search with filtering by tags, context, and importance
+- **Memory Organization**: Tag-based categorization and importance scoring (1-10)
+- **Access Tracking**: Monitor memory usage with access count and timestamps
+- **HTTP Fallback**: Built-in HTTP endpoints for health checks and direct memory operations
+- **Queue System**: Persistent queue for reliable memory operations during startup
 - **Cross-platform**: Works on Windows, macOS, and Linux
 
 ## Installation
@@ -41,7 +43,7 @@ Add to your MCP client configuration (e.g., Jan):
 ```json
 {
   "mcpServers": {
-    "deepmemory": {
+    "deepmemory-mcp": {
       "command": "node",
       "args": ["path/to/deepmemory-mcp/dist/index.js"],
       "env": {},
@@ -110,93 +112,68 @@ Search through stored memories using various filters.
 
 ### get_memories
 
-Retrieve recent memories and optionally get statistics.
+Retrieve recent memories with optional filtering.
 
 **Parameters:**
-- `limit` (number, optional): Number of recent memories (default: 20)
-- `include_stats` (boolean, optional): Include memory statistics (default: false)
+
+- `limit` (number, optional): Number of memories to retrieve (default: 20)
+- `context` (string, optional): Filter by context
+- `min_importance` (number, optional): Minimum importance level (1-10)
 
 **Example:**
+
 ```json
 {
   "limit": 10,
-  "include_stats": true
+  "context": "user_preferences",
+  "min_importance": 5
 }
 ```
 
-### configure_storage
+### load_all_memory
 
-Configure storage provider (local or Google Drive).
-
-**For Local Storage:**
-```json
-{
-  "type": "local",
-  "local_path": "/custom/path/to/memory" // optional
-}
-```
-
-**For Google Drive Storage:**
-```json
-{
-  "type": "googledrive",
-  "google_client_id": "your-client-id",
-  "google_client_secret": "your-client-secret",
-  "google_auth_code": "authorization-code"
-}
-```
-
-### get_google_auth_url
-
-Get Google OAuth2 authorization URL for Drive access.
+Load all memories from the database without any filtering or limits.
 
 **Parameters:**
-- `client_id` (string, required): Google OAuth2 client ID
-- `client_secret` (string, required): Google OAuth2 client secret
 
-## Storage Configuration
+- None
 
-### Local Storage
+**Example:**
 
-By default, memories are stored locally in:
-- Windows: `C:\Users\Username\.deepmemory\memory.json`
-- macOS: `/Users/Username/.deepmemory/memory.json`
-- Linux: `/home/username/.deepmemory/memory.json`
+```json
+{}
+```
 
-### Google Drive Storage
+### get_memory_stats
 
-To use Google Drive storage:
+Get statistics about stored memories.
 
-1. **Create Google Cloud Project:**
-   - Go to [Google Cloud Console](https://console.cloud.google.com/)
-   - Create a new project or select existing one
-   - Enable Google Drive API
+**Parameters:**
 
-2. **Create OAuth2 Credentials:**
-   - Go to APIs & Services > Credentials
-   - Create OAuth2 Client ID (Desktop application)
-   - Note the Client ID and Client Secret
+- None
 
-3. **Configure Storage:**
-   ```json
-   {
-     "type": "googledrive",
-     "google_client_id": "your-client-id",
-     "google_client_secret": "your-client-secret"
-   }
-   ```
+**Example:**
 
-4. **Get Authorization URL:**
-   Use `get_google_auth_url` tool to get the authorization URL
+```json
+{}
+```
 
-5. **Complete Setup:**
-   Visit the URL, authorize, and use the code with `configure_storage`
+## Storage
+
+Memories are stored locally in SQLite database files:
+
+- **Database**: `deepmemory.db` - Main SQLite database containing all memories
+- **Queue**: `queue.jsonl` - Persistent queue for operations during startup
+- **Location**: `~/.deepmemory/` directory in user's home folder
+
+The database includes automatic indexing for optimal performance on searches by timestamp, importance, context, and tags.
 
 ## Memory Management
 
 ### Importance Scoring
 
 Memories are scored 1-10 based on importance:
+
 - 1-3: Low importance (casual information)
 - 4-6: Medium importance (useful context)
 - 7-8: High importance (key preferences/facts)
@@ -205,6 +182,7 @@ Memories are scored 1-10 based on importance:
 ### Automatic Cleanup
 
 When memory reaches the maximum limit (default: 10,000 entries), the system automatically removes less important memories based on:
+
 - Importance score (50% weight)
 - Access frequency (30% weight)
 - Age/last accessed (20% weight)
@@ -224,12 +202,11 @@ When memory reaches the maximum limit (default: 10,000 entries), the system auto
 ```
 deepmemory-mcp/
 ├── src/
-│   ├── types/
-│   │   └── index.ts          # Type definitions
+│   ├── index.ts              # Main server implementation
 │   ├── providers/
-│   │   ├── LocalStorageProvider.ts
-│   │   └── GoogleDriveProvider.ts
-│   └── index.ts              # Main server
+│   │   └── SQLiteProvider.ts # SQLite database provider
+│   └── types/
+│       └── index.ts          # Type definitions
 ├── dist/                     # Compiled JavaScript
 ├── package.json
 ├── tsconfig.json
@@ -239,39 +216,42 @@ deepmemory-mcp/
 ## Dependencies
 
 - **@modelcontextprotocol/sdk**: MCP protocol implementation
-- **googleapis**: Google Drive API client
-- **google-auth-library**: Google OAuth2 authentication
-- **fuse.js**: Fuzzy search functionality
+- **sqlite3**: SQLite database driver for Node.js
 - **uuid**: Unique identifier generation
-- **date-fns**: Date formatting utilities
 
 ## Security
 
-- OAuth2 tokens are stored securely in local configuration
-- Memory data is encrypted when stored on Google Drive
-- All file operations are restricted to designated directories
+- All file operations are restricted to the user's home directory
+- SQLite database files are stored locally with appropriate permissions
 - No sensitive data is logged or exposed
+- Memory operations are validated and sanitized
 
 ## Troubleshooting
 
 ### Common Issues
 
-**"Storage provider not configured":**
-- Run `configure_storage` tool first to set up your storage
-
-**Google Drive authentication errors:**
-- Ensure Google Drive API is enabled in your project
-- Check that OAuth2 credentials are correct
-- Verify the authorization code hasn't expired
-
 **Permission errors:**
-- Ensure the application has write permissions to the storage directory
-- For Google Drive, verify the OAuth2 scope includes drive.file
+
+- Ensure the application has write permissions to the `~/.deepmemory/` directory
+- Check that the user has access to their home directory
+
+**Database errors:**
+
+- Verify that SQLite3 is properly installed
+- Check that the `~/.deepmemory/` directory exists and is writable
+- Ensure no other processes are using the database file
 
 **Memory not found:**
-- Check that memories were saved successfully
-- Verify storage configuration is correct
-- For Google Drive, ensure internet connectivity
+
+- Check that memories were saved successfully using `add_memory`
+- Verify search parameters when using `search_memory`
+- Use `get_memory_stats` to check database status
+
+**Server won't start:**
+
+- Ensure Node.js 18+ is installed
+- Check that all dependencies are installed with `npm install`
+- Verify the build completed successfully with `npm run build`
 
 ## Contributing
 
@@ -288,6 +268,7 @@ MIT License - see LICENSE file for details.
 ## Support
 
 For issues and questions:
+
 - Create an issue on GitHub
 - Check existing issues for solutions
 - Review the troubleshooting section above

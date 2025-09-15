@@ -1,7 +1,7 @@
 {
   "name": "deepmemory-mcp",
   "version": "1.0.0",
-  "description": "Model Context Protocol server for long-term memory management with local and Google Drive storage",
+  "description": "Model Context Protocol server for long-term memory management with SQLite storage",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -11,8 +11,6 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
-    "test": "node --test",
-    "integration-test": "tsx test/integration.test.ts",
     "clean": "rimraf dist"
   },
   "keywords": [
@@ -20,17 +18,15 @@
     "memory",
     "ai",
     "storage",
-    "google-drive",
+    "sqlite",
     "long-term"
   ],
   "author": "Théo",
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^0.5.0",
-    "date-fns": "^2.30.0",
-    "fuse.js": "^7.0.0",
-    "google-auth-library": "^9.0.0",
-    "googleapis": "^128.0.0",
+    "@types/sqlite3": "^3.1.11",
+    "sqlite3": "^5.1.7",
     "uuid": "^9.0.0"
   },
   "devDependencies": {
