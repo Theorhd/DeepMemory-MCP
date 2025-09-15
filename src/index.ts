@@ -53,7 +53,7 @@ export class DeepMemoryServer {
     this.server = new Server(
       {
         name: "deepmemory-mcp",
-        version: "1.0.0",
+        version: "1.0.1",
       },
       {
         capabilities: {
@@ -203,6 +203,57 @@ export class DeepMemoryServer {
           properties: {},
           required: []
         }
+      },
+      {
+        name: "delete_memory",
+        description: "Delete memories by id or by filters (tags, context, query, importance, before date)",
+        inputSchema: {
+          type: "object",
+          properties: {
+            id: { type: "string", description: "ID of the memory to delete (exact match)" },
+            tags: { type: "array", items: { type: "string" }, description: "Delete memories matching any of these tags" },
+            context: { type: "string", description: "Delete memories matching context" },
+            query: { type: "string", description: "Delete memories whose content matches this substring" },
+            importance_less_than: { type: "number", description: "Delete memories with importance less than this value" },
+            before: { type: "string", description: "ISO date string; delete memories older than this date" }
+            ,
+            force: { type: "boolean", description: "Set to true to allow deletion without filters (use with caution)" }
+          },
+          required: []
+        }
+      }
+      ,
+      {
+        name: "update_memory",
+        description: "Update memories' fields (content, tags, context, importance, metadata) by id or filters",
+        inputSchema: {
+          type: "object",
+          properties: {
+            id: { type: "string", description: "ID of the memory to update (exact match)" },
+            filters: {
+              type: "object",
+              properties: {
+                tags: { type: "array", items: { type: "string" } },
+                query: { type: "string" },
+                context: { type: "string" },
+                importance_less_than: { type: "number" },
+                before: { type: "string", description: "ISO date string" }
+              }
+            },
+            update: {
+              type: "object",
+              properties: {
+                content: { type: "string" },
+                tags: { type: "array", items: { type: "string" } },
+                context: { type: "string" },
+                importance: { type: "number" },
+                metadata: { type: "object" }
+              }
+            },
+            force: { type: "boolean", description: "Set to true to allow updating without filters (use with caution)" }
+          },
+          required: ["update"]
+        }
       }
     ];
 
@@ -247,6 +298,10 @@ export class DeepMemoryServer {
             return await this.handleLoadAllMemory();
           case "get_memory_stats":
             return await this.handleGetStats();
+          case "delete_memory":
+            return await this.handleDeleteMemory(args);
+          case "update_memory":
+            return await this.handleUpdateMemory(args);
           default:
             throw new Error(`Unknown tool: ${name}`);
         }
@@ -429,6 +484,81 @@ export class DeepMemoryServer {
 - Total entries: ${stats.totalEntries}
 - Last modified: ${lastModifiedStr}
 - Storage: ${this.sqliteProvider.getStorageInfo()}`
+        }
+      ]
+    };
+  }
+
+  private async handleDeleteMemory(args: any) {
+    if (!args || typeof args !== 'object') {
+      throw new Error('Invalid arguments object');
+    }
+
+    const options = {
+      id: typeof args.id === 'string' ? args.id : undefined,
+      tags: Array.isArray(args.tags) ? args.tags : undefined,
+      context: typeof args.context === 'string' ? args.context : undefined,
+      query: typeof args.query === 'string' ? args.query : undefined,
+      importanceLessThan: typeof args.importance_less_than === 'number' ? args.importance_less_than : (typeof args.importance_less_than === 'string' ? Number(args.importance_less_than) : undefined),
+      before: typeof args.before === 'string' ? args.before : undefined
+    };
+
+    const deletedCount = await this.withTimeout(
+      this.sqliteProvider.deleteMemories(options as any)
+    );
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: `Deleted ${deletedCount} memory entries.`
+        }
+      ]
+    };
+  }
+
+  private async handleUpdateMemory(args: any) {
+    if (!args || typeof args !== 'object') {
+      throw new Error('Invalid arguments object');
+    }
+
+    if (!args.update || typeof args.update !== 'object') {
+      throw new Error('`update` object is required');
+    }
+
+    const updateObj: any = {};
+    if (typeof args.update.content === 'string') updateObj.content = args.update.content;
+    if (Array.isArray(args.update.tags)) updateObj.tags = args.update.tags;
+    if (typeof args.update.context === 'string') updateObj.context = args.update.context;
+    if (typeof args.update.importance === 'number') updateObj.importance = args.update.importance;
+    if (args.update.metadata && typeof args.update.metadata === 'object') updateObj.metadata = args.update.metadata;
+
+    if (Object.keys(updateObj).length === 0) {
+      throw new Error('No valid update fields provided');
+    }
+
+    const options = {
+      id: typeof args.id === 'string' ? args.id : undefined,
+      filters: args.filters ? {
+        tags: Array.isArray(args.filters.tags) ? args.filters.tags : undefined,
+        query: typeof args.filters.query === 'string' ? args.filters.query : undefined,
+        context: typeof args.filters.context === 'string' ? args.filters.context : undefined,
+        importanceLessThan: typeof args.filters.importance_less_than === 'number' ? args.filters.importance_less_than : (typeof args.filters.importance_less_than === 'string' ? Number(args.filters.importance_less_than) : undefined),
+        before: typeof args.filters.before === 'string' ? args.filters.before : undefined
+      } : undefined,
+      update: updateObj,
+      force: !!args.force
+    };
+
+    const updatedCount = await this.withTimeout(
+      this.sqliteProvider.updateMemories(options as any)
+    );
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: `Updated ${updatedCount} memory entries.`
         }
       ]
     };

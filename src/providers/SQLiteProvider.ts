@@ -302,6 +302,159 @@ export class SQLiteProvider {
     });
   }
 
+  /**
+   * Delete memories by id or by a set of filter options.
+   * Returns the number of deleted rows.
+   */
+  async deleteMemories(options: { id?: string; tags?: string[]; context?: string; query?: string; importanceLessThan?: number; before?: string; force?: boolean }): Promise<number> {
+    if (!this.db) throw new Error('Database not initialized');
+    const hasFilters = !!(options.id || (options.tags && options.tags.length > 0) || options.context || options.query || typeof options.importanceLessThan === 'number' || options.before);
+    if (!hasFilters && !options.force) {
+      throw new Error('Refusing to delete all memories without filters. Provide at least one filter or set force=true.');
+    }
+
+    let sql = 'DELETE FROM memories WHERE 1=1';
+    const params: any[] = [];
+
+    if (options.id) {
+      sql = 'DELETE FROM memories WHERE id = ?';
+      params.push(options.id);
+    } else {
+      if (options.query) {
+        sql += ' AND content LIKE ?';
+        params.push(`%${options.query}%`);
+      }
+
+      if (options.tags && options.tags.length > 0) {
+        const tagConditions = options.tags.map(() => 'tags LIKE ?').join(' OR ');
+        sql += ` AND (${tagConditions})`;
+        options.tags.forEach(tag => params.push(`%"${tag}"%`));
+      }
+
+      if (options.context) {
+        sql += ' AND context LIKE ?';
+        params.push(`%${options.context}%`);
+      }
+
+      if (typeof options.importanceLessThan === 'number') {
+        sql += ' AND importance < ?';
+        params.push(options.importanceLessThan);
+      }
+
+      if (options.before) {
+        const beforeIso = new Date(options.before).toISOString();
+        sql += ' AND timestamp < ?';
+        params.push(beforeIso);
+      }
+    }
+
+    return new Promise((resolve, reject) => {
+      this.db!.run(sql, params, function(this: any, err: any) {
+        if (err) {
+          console.error('Error deleting memories:', err);
+          reject(err);
+          return;
+        }
+        // sqlite3 exposes number of affected rows as 'this.changes'
+        resolve(typeof this.changes === 'number' ? this.changes : 0);
+      });
+    });
+  }
+
+  /**
+   * Update memories by id or by filters. Returns number of updated rows.
+   * Fields that can be updated: content, tags, context, importance, metadata.
+   */
+  async updateMemories(options: { id?: string; filters?: { tags?: string[]; query?: string; context?: string; importanceLessThan?: number; before?: string }; update: { content?: string; tags?: string[]; context?: string; importance?: number; metadata?: Record<string, any> }; force?: boolean }): Promise<number> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const { id, filters = {}, update, force } = options;
+
+    if (!id) {
+      const hasFilters = !!(filters.query || filters.context || (filters.tags && filters.tags.length > 0) || typeof filters.importanceLessThan === 'number' || filters.before);
+      if (!hasFilters && !force) {
+        throw new Error('Refusing to update all memories without filters. Provide filters or set force=true.');
+      }
+    }
+
+    const setParts: string[] = [];
+    const params: any[] = [];
+
+    if (typeof update.content === 'string') {
+      setParts.push('content = ?');
+      params.push(update.content);
+    }
+
+    if (Array.isArray(update.tags)) {
+      setParts.push('tags = ?');
+      params.push(JSON.stringify(update.tags));
+    }
+
+    if (typeof update.context === 'string') {
+      setParts.push('context = ?');
+      params.push(update.context);
+    }
+
+    if (typeof update.importance === 'number') {
+      setParts.push('importance = ?');
+      params.push(update.importance);
+    }
+
+    if (update.metadata && typeof update.metadata === 'object') {
+      setParts.push('metadata = ?');
+      params.push(JSON.stringify(update.metadata));
+    }
+
+    if (setParts.length === 0) {
+      throw new Error('No update fields provided');
+    }
+
+    let sql = `UPDATE memories SET ${setParts.join(', ')} WHERE 1=1`;
+
+    if (id) {
+      sql += ' AND id = ?';
+      params.push(id);
+    } else {
+      if (filters.query) {
+        sql += ' AND content LIKE ?';
+        params.push(`%${filters.query}%`);
+      }
+
+      if (filters.tags && filters.tags.length > 0) {
+        const tagConditions = filters.tags.map(() => 'tags LIKE ?').join(' OR ');
+        sql += ` AND (${tagConditions})`;
+        filters.tags.forEach(tag => params.push(`%"${tag}"%`));
+      }
+
+      if (filters.context) {
+        sql += ' AND context LIKE ?';
+        params.push(`%${filters.context}%`);
+      }
+
+      if (typeof filters.importanceLessThan === 'number') {
+        sql += ' AND importance < ?';
+        params.push(filters.importanceLessThan);
+      }
+
+      if (filters.before) {
+        const beforeIso = new Date(filters.before).toISOString();
+        sql += ' AND timestamp < ?';
+        params.push(beforeIso);
+      }
+    }
+
+    return new Promise((resolve, reject) => {
+      this.db!.run(sql, params, function(this: any, err: any) {
+        if (err) {
+          console.error('Error updating memories:', err);
+          reject(err);
+          return;
+        }
+        resolve(typeof this.changes === 'number' ? this.changes : 0);
+      });
+    });
+  }
+
   private async updateAccessCount(ids: string[]): Promise<void> {
     if (!this.db || ids.length === 0) return;
 
