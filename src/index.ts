@@ -8,7 +8,7 @@ import {
   CallToolRequest,
 } from "@modelcontextprotocol/sdk/types.js";
 import { SQLiteProvider } from './providers/SQLiteProvider.js';
-import { SearchOptions, MemoryEntry } from './types/index.js';
+import { SearchOptions, MemoryEntry, CreateClusterOptions, UpdateClusterOptions, ClusterSearchOptions } from './types/index.js';
 import * as path from 'path';
 import { promises as fs } from 'fs';
 import { fileURLToPath } from 'url';
@@ -49,11 +49,119 @@ export class DeepMemoryServer {
     });
   }
 
+  private async handleCreateCluster(args: any) {
+    if (!args || typeof args !== 'object') throw new Error('Invalid arguments');
+    const { name, description, tags = [], details = [], metadata = {} } = args;
+    if (!name || !description) throw new Error('`name` and `description` are required');
+
+    const cluster = await this.withTimeout(
+      this.sqliteProvider.createCluster({ name, description, tags, details, metadata } as CreateClusterOptions)
+    );
+
+    return {
+      content: [ { type: 'text', text: `Cluster created with ID: ${cluster.id}` } ]
+    };
+  }
+
+  private async handleSearchClusters(args: any) {
+    const options: ClusterSearchOptions = {
+      query: typeof args.query === 'string' ? args.query : undefined,
+      tags: Array.isArray(args.tags) ? args.tags : undefined,
+      limit: Math.max(1, Math.min(100, Number(args.limit) || 20)),
+      sortBy: args.sort_by || 'createdAt',
+      sortOrder: args.sort_order || 'desc'
+    };
+
+    const clusters = await this.withTimeout(this.sqliteProvider.searchClusters(options));
+
+    const listText = clusters.map(c => `- ${c.name} (id: ${c.id})`).join('\n');
+
+    return {
+      content: [ { type: 'text', text: `Found ${clusters.length} clusters:\n${listText}` } ],
+      data: clusters
+    };
+  }
+
+  private async handleGetCluster(args: any) {
+    if (!args || typeof args.id !== 'string') throw new Error('`id` is required');
+    const cluster = await this.withTimeout(this.sqliteProvider.getClusterById(args.id));
+    if (!cluster) throw new Error('Cluster not found');
+    return { content: [ { type: 'text', text: JSON.stringify(cluster, null, 2) } ], data: cluster };
+  }
+
+  private async handleAddClusterDetail(args: any) {
+    if (!args || typeof args.clusterId !== 'string') throw new Error('`clusterId` is required');
+    if (typeof args.key !== 'string' || typeof args.value !== 'string') throw new Error('`key` and `value` are required');
+    const detail = await this.withTimeout(this.sqliteProvider.addClusterDetail(args.clusterId, {
+      key: args.key,
+      value: args.value,
+      type: args.type || 'text',
+      importance: typeof args.importance === 'number' ? args.importance : 5
+    }));
+    return { content: [ { type: 'text', text: `Detail added with ID: ${detail.id}` } ], data: detail };
+  }
+
+  private async handleUpdateCluster(args: any) {
+    if (!args || typeof args.id !== 'string') throw new Error('`id` is required');
+    const update: UpdateClusterOptions = {} as any;
+    if (typeof args.name === 'string') update.name = args.name;
+    if (typeof args.description === 'string') update.description = args.description;
+    if (Array.isArray(args.tags)) update.tags = args.tags;
+    if (args.metadata && typeof args.metadata === 'object') update.metadata = args.metadata;
+
+    const updated = await this.withTimeout(this.sqliteProvider.updateCluster(args.id, update));
+    if (!updated) throw new Error('Cluster not found or no changes');
+    return { content: [ { type: 'text', text: `Cluster updated: ${updated.id}` } ], data: updated };
+  }
+
+  private async handleUpdateClusterDetail(args: any) {
+    if (!args || typeof args.detailId !== 'string') throw new Error('`detailId` is required');
+    const update: any = {};
+    if (typeof args.key === 'string') update.key = args.key;
+    if (typeof args.value === 'string') update.value = args.value;
+    if (typeof args.type === 'string') update.type = args.type;
+    if (typeof args.importance === 'number') update.importance = args.importance;
+
+    const updated = await this.withTimeout(this.sqliteProvider.updateClusterDetail(args.detailId, update));
+    if (!updated) throw new Error('Detail not found or no changes');
+    return { content: [ { type: 'text', text: `Cluster detail updated: ${updated.id}` } ], data: updated };
+  }
+
+  private async handleDeleteCluster(args: any) {
+    if (!args || typeof args.id !== 'string') throw new Error('`id` is required');
+    const deleted = await this.withTimeout(this.sqliteProvider.deleteCluster(args.id));
+    return { content: [ { type: 'text', text: `Deleted ${deleted} cluster(s)` } ] };
+  }
+
+  private async handleDeleteClusterDetail(args: any) {
+    if (!args || typeof args.detailId !== 'string') throw new Error('`detailId` is required');
+    const deleted = await this.withTimeout(this.sqliteProvider.deleteClusterDetail(args.detailId));
+    return { content: [ { type: 'text', text: `Deleted ${deleted} detail(s)` } ] };
+  }
+
+  private async handleLinkMemoryToCluster(args: any) {
+    if (!args || typeof args.memoryId !== 'string' || typeof args.clusterId !== 'string') throw new Error('`memoryId` and `clusterId` are required');
+    const ok = await this.withTimeout(this.sqliteProvider.linkMemoryToCluster(args.memoryId, args.clusterId));
+    return { content: [ { type: 'text', text: ok ? 'Memory linked to cluster' : 'Memory or cluster not found' } ] };
+  }
+
+  private async handleUnlinkMemoryFromCluster(args: any) {
+    if (!args || typeof args.memoryId !== 'string') throw new Error('`memoryId` is required');
+    const ok = await this.withTimeout(this.sqliteProvider.unlinkMemoryFromCluster(args.memoryId));
+    return { content: [ { type: 'text', text: ok ? 'Memory unlinked from cluster' : 'Memory not found or not linked' } ] };
+  }
+
+  private async handleGetMemoriesByCluster(args: any) {
+    if (!args || typeof args.clusterId !== 'string') throw new Error('`clusterId` is required');
+    const entries = await this.withTimeout(this.sqliteProvider.getMemoriesByCluster(args.clusterId));
+    return { content: [ { type: 'text', text: `Found ${entries.length} memories in cluster` } ], data: entries };
+  }
+
   constructor() {
     this.server = new Server(
       {
         name: "deepmemory-mcp",
-        version: "1.0.1",
+        version: "1.1.0",
       },
       {
         capabilities: {
@@ -110,6 +218,10 @@ export class DeepMemoryServer {
               type: "object",
               description: "Additional metadata for this memory",
               default: {}
+            },
+            clusterId: {
+              type: "string",
+              description: "Optional: ID of the cluster to associate this memory with"
             }
           },
           required: ["content"]
@@ -156,6 +268,11 @@ export class DeepMemoryServer {
               enum: ["asc", "desc"],
               description: "Sort order",
               default: "desc"
+            },
+            include_cluster_details: {
+              type: "boolean",
+              description: "Include cluster details in results if memories are linked to clusters",
+              default: true
             }
           },
           required: []
@@ -197,7 +314,7 @@ export class DeepMemoryServer {
       },
       {
         name: "get_memory_stats",
-        description: "Get statistics about stored memories",
+        description: "Get statistics about stored memories and clusters",
         inputSchema: {
           type: "object",
           properties: {},
@@ -225,7 +342,7 @@ export class DeepMemoryServer {
       ,
       {
         name: "update_memory",
-        description: "Update memories' fields (content, tags, context, importance, metadata) by id or filters",
+        description: "Update memories' fields (content, tags, context, importance, metadata, clusterId) by id or filters",
         inputSchema: {
           type: "object",
           properties: {
@@ -247,12 +364,260 @@ export class DeepMemoryServer {
                 tags: { type: "array", items: { type: "string" } },
                 context: { type: "string" },
                 importance: { type: "number" },
-                metadata: { type: "object" }
+                metadata: { type: "object" },
+                clusterId: { type: "string", description: "Set to null to unlink from cluster" }
               }
             },
             force: { type: "boolean", description: "Set to true to allow updating without filters (use with caution)" }
           },
           required: ["update"]
+        }
+  },
+
+      {
+        name: "create_cluster",
+        description: "Create a new details cluster to group related information",
+        inputSchema: {
+          type: "object",
+          properties: {
+            name: {
+              type: "string",
+              description: "Name of the cluster (e.g., 'Trip to Japan', 'Work Project Alpha')"
+            },
+            description: {
+              type: "string",
+              description: "Description of what this cluster represents"
+            },
+            tags: {
+              type: "array",
+              items: { type: "string" },
+              description: "Tags to categorize this cluster",
+              default: []
+            },
+            details: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  key: { type: "string", description: "Detail key (e.g., 'destination', 'budget', 'dates')" },
+                  value: { type: "string", description: "Detail value" },
+                  type: { 
+                    type: "string", 
+                    enum: ["text", "number", "date", "list", "json"], 
+                    default: "text" 
+                  },
+                  importance: { type: "number", minimum: 1, maximum: 10, default: 5 }
+                },
+                required: ["key", "value"]
+              },
+              description: "Initial details to add to the cluster",
+              default: []
+            },
+            metadata: {
+              type: "object",
+              description: "Additional metadata for this cluster",
+              default: {}
+            }
+          },
+          required: ["name", "description"]
+        }
+      },
+      {
+        name: "search_clusters",
+        description: "Search through existing clusters",
+        inputSchema: {
+          type: "object",
+          properties: {
+            query: {
+              type: "string",
+              description: "Search query for cluster names or descriptions"
+            },
+            tags: {
+              type: "array",
+              items: { type: "string" },
+              description: "Filter by specific tags"
+            },
+            limit: {
+              type: "number",
+              description: "Maximum number of results to return",
+              default: 20
+            },
+            sort_by: {
+              type: "string",
+              enum: ["createdAt", "updatedAt", "name"],
+              description: "Sort results by this field",
+              default: "createdAt"
+            },
+            sort_order: {
+              type: "string",
+              enum: ["asc", "desc"],
+              description: "Sort order",
+              default: "desc"
+            }
+          },
+          required: []
+        }
+      },
+      {
+        name: "get_cluster",
+        description: "Get a specific cluster by ID with all its details",
+        inputSchema: {
+          type: "object",
+          properties: {
+            id: {
+              type: "string",
+              description: "ID of the cluster to retrieve"
+            }
+          },
+          required: ["id"]
+        }
+      },
+      {
+        name: "add_cluster_detail",
+        description: "Add a new detail to an existing cluster",
+        inputSchema: {
+          type: "object",
+          properties: {
+            clusterId: {
+              type: "string",
+              description: "ID of the cluster to add the detail to"
+            },
+            key: {
+              type: "string",
+              description: "Key for the detail (e.g., 'hotel', 'flight_info', 'budget_breakdown')"
+            },
+            value: {
+              type: "string",
+              description: "Value of the detail"
+            },
+            type: {
+              type: "string",
+              enum: ["text", "number", "date", "list", "json"],
+              description: "Type of the detail",
+              default: "text"
+            },
+            importance: {
+              type: "number",
+              description: "Importance level (1-10)",
+              minimum: 1,
+              maximum: 10,
+              default: 5
+            }
+          },
+          required: ["clusterId", "key", "value"]
+        }
+      },
+      {
+        name: "update_cluster",
+        description: "Update cluster information (name, description, tags, metadata)",
+        inputSchema: {
+          type: "object",
+          properties: {
+            id: {
+              type: "string",
+              description: "ID of the cluster to update"
+            },
+            name: { type: "string" },
+            description: { type: "string" },
+            tags: { type: "array", items: { type: "string" } },
+            metadata: { type: "object" }
+          },
+          required: ["id"]
+        }
+      },
+      {
+        name: "update_cluster_detail",
+        description: "Update a specific detail within a cluster",
+        inputSchema: {
+          type: "object",
+          properties: {
+            detailId: {
+              type: "string",
+              description: "ID of the detail to update"
+            },
+            key: { type: "string" },
+            value: { type: "string" },
+            type: { 
+              type: "string", 
+              enum: ["text", "number", "date", "list", "json"] 
+            },
+            importance: { type: "number", minimum: 1, maximum: 10 }
+          },
+          required: ["detailId"]
+        }
+      },
+      {
+        name: "delete_cluster",
+        description: "Delete a cluster and all its details (memories will be unlinked but not deleted)",
+        inputSchema: {
+          type: "object",
+          properties: {
+            id: {
+              type: "string",
+              description: "ID of the cluster to delete"
+            }
+          },
+          required: ["id"]
+        }
+      },
+      {
+        name: "delete_cluster_detail",
+        description: "Delete a specific detail from a cluster",
+        inputSchema: {
+          type: "object",
+          properties: {
+            detailId: {
+              type: "string",
+              description: "ID of the detail to delete"
+            }
+          },
+          required: ["detailId"]
+        }
+      },
+      {
+        name: "link_memory_to_cluster",
+        description: "Link an existing memory to a cluster",
+        inputSchema: {
+          type: "object",
+          properties: {
+            memoryId: {
+              type: "string",
+              description: "ID of the memory to link"
+            },
+            clusterId: {
+              type: "string",
+              description: "ID of the cluster to link to"
+            }
+          },
+          required: ["memoryId", "clusterId"]
+        }
+      },
+      {
+        name: "unlink_memory_from_cluster",
+        description: "Unlink a memory from its cluster",
+        inputSchema: {
+          type: "object",
+          properties: {
+            memoryId: {
+              type: "string",
+              description: "ID of the memory to unlink"
+            }
+          },
+          required: ["memoryId"]
+        }
+      },
+      {
+        name: "get_memories_by_cluster",
+        description: "Get all memories linked to a specific cluster",
+        inputSchema: {
+          type: "object",
+          properties: {
+            clusterId: {
+              type: "string",
+              description: "ID of the cluster"
+            }
+          },
+          required: ["clusterId"]
         }
       }
     ];
@@ -302,6 +667,30 @@ export class DeepMemoryServer {
             return await this.handleDeleteMemory(args);
           case "update_memory":
             return await this.handleUpdateMemory(args);
+
+          case "create_cluster":
+            return await this.handleCreateCluster(args);
+          case "search_clusters":
+            return await this.handleSearchClusters(args);
+          case "get_cluster":
+            return await this.handleGetCluster(args);
+          case "add_cluster_detail":
+            return await this.handleAddClusterDetail(args);
+          case "update_cluster":
+            return await this.handleUpdateCluster(args);
+          case "update_cluster_detail":
+            return await this.handleUpdateClusterDetail(args);
+          case "delete_cluster":
+            return await this.handleDeleteCluster(args);
+          case "delete_cluster_detail":
+            return await this.handleDeleteClusterDetail(args);
+          case "link_memory_to_cluster":
+            return await this.handleLinkMemoryToCluster(args);
+          case "unlink_memory_from_cluster":
+            return await this.handleUnlinkMemoryFromCluster(args);
+          case "get_memories_by_cluster":
+            return await this.handleGetMemoriesByCluster(args);
+
           default:
             throw new Error(`Unknown tool: ${name}`);
         }
