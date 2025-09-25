@@ -8,7 +8,8 @@ import {
   CallToolRequest,
 } from "@modelcontextprotocol/sdk/types.js";
 import { SQLiteProvider } from './providers/SQLiteProvider.js';
-import { SearchOptions, MemoryEntry, CreateClusterOptions, UpdateClusterOptions, ClusterSearchOptions } from './types/index.js';
+import { MySQLProvider } from './providers/MySQLProvider.js';
+import { SearchOptions, MemoryEntry, CreateClusterOptions, UpdateClusterOptions, ClusterSearchOptions, DetailsCluster, ClusterDetail, SearchResult } from './types/index.js';
 import * as path from 'path';
 import { promises as fs } from 'fs';
 import { fileURLToPath } from 'url';
@@ -24,8 +25,8 @@ const __dirname = path.dirname(__filename);
 
 export class DeepMemoryServer {
   private server: Server;
-  private sqliteProvider: SQLiteProvider;
-  private sqliteReady: boolean = false;
+  private provider: any;
+  private providerReady: boolean = false;
   private requestTimeoutMs: number = 10000;
   private queuePath: string;
   private httpPort: number;
@@ -54,8 +55,8 @@ export class DeepMemoryServer {
     const { name, description, tags = [], details = [], metadata = {} } = args;
     if (!name || !description) throw new Error('`name` and `description` are required');
 
-    const cluster = await this.withTimeout(
-      this.sqliteProvider.createCluster({ name, description, tags, details, metadata } as CreateClusterOptions)
+    const cluster = await this.withTimeout<DetailsCluster>(
+      this.provider.createCluster({ name, description, tags, details, metadata } as CreateClusterOptions)
     );
 
     return {
@@ -72,7 +73,7 @@ export class DeepMemoryServer {
       sortOrder: args.sort_order || 'desc'
     };
 
-    const clusters = await this.withTimeout(this.sqliteProvider.searchClusters(options));
+  const clusters = await this.withTimeout<DetailsCluster[]>(this.provider.searchClusters(options));
 
     const listText = clusters.map(c => `- ${c.name} (id: ${c.id})`).join('\n');
 
@@ -84,7 +85,7 @@ export class DeepMemoryServer {
 
   private async handleGetCluster(args: any) {
     if (!args || typeof args.id !== 'string') throw new Error('`id` is required');
-    const cluster = await this.withTimeout(this.sqliteProvider.getClusterById(args.id));
+  const cluster = await this.withTimeout<DetailsCluster | null>(this.provider.getClusterById(args.id));
     if (!cluster) throw new Error('Cluster not found');
     return { content: [ { type: 'text', text: JSON.stringify(cluster, null, 2) } ], data: cluster };
   }
@@ -92,7 +93,7 @@ export class DeepMemoryServer {
   private async handleAddClusterDetail(args: any) {
     if (!args || typeof args.clusterId !== 'string') throw new Error('`clusterId` is required');
     if (typeof args.key !== 'string' || typeof args.value !== 'string') throw new Error('`key` and `value` are required');
-    const detail = await this.withTimeout(this.sqliteProvider.addClusterDetail(args.clusterId, {
+  const detail = await this.withTimeout<ClusterDetail>(this.provider.addClusterDetail(args.clusterId, {
       key: args.key,
       value: args.value,
       type: args.type || 'text',
@@ -109,7 +110,7 @@ export class DeepMemoryServer {
     if (Array.isArray(args.tags)) update.tags = args.tags;
     if (args.metadata && typeof args.metadata === 'object') update.metadata = args.metadata;
 
-    const updated = await this.withTimeout(this.sqliteProvider.updateCluster(args.id, update));
+  const updated = await this.withTimeout<DetailsCluster | null>(this.provider.updateCluster(args.id, update));
     if (!updated) throw new Error('Cluster not found or no changes');
     return { content: [ { type: 'text', text: `Cluster updated: ${updated.id}` } ], data: updated };
   }
@@ -122,42 +123,42 @@ export class DeepMemoryServer {
     if (typeof args.type === 'string') update.type = args.type;
     if (typeof args.importance === 'number') update.importance = args.importance;
 
-    const updated = await this.withTimeout(this.sqliteProvider.updateClusterDetail(args.detailId, update));
+  const updated = await this.withTimeout<ClusterDetail | null>(this.provider.updateClusterDetail(args.detailId, update));
     if (!updated) throw new Error('Detail not found or no changes');
     return { content: [ { type: 'text', text: `Cluster detail updated: ${updated.id}` } ], data: updated };
   }
 
   private async handleDeleteCluster(args: any) {
     if (!args || typeof args.id !== 'string') throw new Error('`id` is required');
-    const deleted = await this.withTimeout(this.sqliteProvider.deleteCluster(args.id));
+  const deleted = await this.withTimeout<number>(this.provider.deleteCluster(args.id));
     return { content: [ { type: 'text', text: `Deleted ${deleted} cluster(s)` } ] };
   }
 
   private async handleDeleteClusterDetail(args: any) {
     if (!args || typeof args.detailId !== 'string') throw new Error('`detailId` is required');
-    const deleted = await this.withTimeout(this.sqliteProvider.deleteClusterDetail(args.detailId));
+  const deleted = await this.withTimeout<number>(this.provider.deleteClusterDetail(args.detailId));
     return { content: [ { type: 'text', text: `Deleted ${deleted} detail(s)` } ] };
   }
 
   private async handleLinkMemoryToCluster(args: any) {
     if (!args || typeof args.memoryId !== 'string' || typeof args.clusterId !== 'string') throw new Error('`memoryId` and `clusterId` are required');
-    const ok = await this.withTimeout(this.sqliteProvider.linkMemoryToCluster(args.memoryId, args.clusterId));
+  const ok = await this.withTimeout<boolean>(this.provider.linkMemoryToCluster(args.memoryId, args.clusterId));
     return { content: [ { type: 'text', text: ok ? 'Memory linked to cluster' : 'Memory or cluster not found' } ] };
   }
 
   private async handleUnlinkMemoryFromCluster(args: any) {
     if (!args || typeof args.memoryId !== 'string') throw new Error('`memoryId` is required');
-    const ok = await this.withTimeout(this.sqliteProvider.unlinkMemoryFromCluster(args.memoryId));
+  const ok = await this.withTimeout<boolean>(this.provider.unlinkMemoryFromCluster(args.memoryId));
     return { content: [ { type: 'text', text: ok ? 'Memory unlinked from cluster' : 'Memory not found or not linked' } ] };
   }
 
   private async handleGetMemoriesByCluster(args: any) {
     if (!args || typeof args.clusterId !== 'string') throw new Error('`clusterId` is required');
-    const entries = await this.withTimeout(this.sqliteProvider.getMemoriesByCluster(args.clusterId));
+  const entries = await this.withTimeout<MemoryEntry[]>(this.provider.getMemoriesByCluster(args.clusterId));
     return { content: [ { type: 'text', text: `Found ${entries.length} memories in cluster` } ], data: entries };
   }
 
-  constructor() {
+  constructor(provider?: any) {
     this.server = new Server(
       {
         name: "deepmemory-mcp",
@@ -176,7 +177,12 @@ export class DeepMemoryServer {
     
     fs.mkdir(deepMemoryDir, { recursive: true }).catch(() => {});
     
-    this.sqliteProvider = new SQLiteProvider(dbPath);
+    // If a provider instance was passed (e.g. MySQLProvider), use it. Otherwise default to SQLiteProvider.
+    if (provider) {
+      this.provider = provider;
+    } else {
+      this.provider = new SQLiteProvider(dbPath);
+    }
     this.queuePath = path.join(deepMemoryDir, 'queue.jsonl');
     this.httpPort = Number(process.env.DEEP_MEMORY_HTTP_PORT) || 6789;
 
@@ -636,18 +642,18 @@ export class DeepMemoryServer {
           throw new Error('Invalid arguments provided');
         }
 
-        if (!this.sqliteReady) {
+        if (!this.providerReady) {
           if (name === 'add_memory') {
             return await this.handleQueuedAddMemory(args);
           }
           
           const maxWait = 5000;
           const startWait = Date.now();
-          while (!this.sqliteReady && (Date.now() - startWait) < maxWait) {
+          while (!this.providerReady && (Date.now() - startWait) < maxWait) {
             await new Promise(resolve => setTimeout(resolve, 100));
           }
 
-          if (!this.sqliteReady) {
+          if (!this.providerReady) {
             throw new Error('Database not ready, please retry later');
           }
         }
@@ -730,8 +736,8 @@ export class DeepMemoryServer {
       throw new Error('Importance must be a number between 1 and 10');
     }
 
-    const entry = await this.withTimeout(
-      this.sqliteProvider.addMemory({
+    const entry = await this.withTimeout<MemoryEntry>(
+      this.provider.addMemory({
         content: content.trim(),
         tags: tags.filter(tag => typeof tag === 'string' && tag.trim().length > 0),
         context: String(context).trim(),
@@ -786,8 +792,8 @@ export class DeepMemoryServer {
       sortOrder: args.sort_order || 'desc'
     };
 
-    const result = await this.withTimeout(
-      this.sqliteProvider.searchMemories(options)
+    const result = await this.withTimeout<SearchResult>(
+      this.provider.searchMemories(options)
     );
 
     if (result.entries.length === 0) {
@@ -822,8 +828,8 @@ export class DeepMemoryServer {
   private async handleGetMemories(args: any) {
     const limit = Math.max(1, Math.min(100, Number(args.limit) || 20));
     
-    const entries = await this.withTimeout(
-      this.sqliteProvider.getRecentMemories(limit)
+    const entries = await this.withTimeout<MemoryEntry[]>(
+      this.provider.getRecentMemories(limit)
     );
 
     if (entries.length === 0) {
@@ -857,8 +863,8 @@ export class DeepMemoryServer {
   }
 
   private async handleGetStats() {
-    const stats = await this.withTimeout(
-      this.sqliteProvider.getStats()
+    const stats = await this.withTimeout<{ totalEntries: number; lastModified: Date | null; totalClusters: number }>(
+      this.provider.getStats()
     );
 
     const lastModifiedStr = stats.lastModified 
@@ -872,7 +878,7 @@ export class DeepMemoryServer {
           text: `Memory Statistics:
 - Total entries: ${stats.totalEntries}
 - Last modified: ${lastModifiedStr}
-- Storage: ${this.sqliteProvider.getStorageInfo()}`
+- Storage: ${this.provider.getStorageInfo()}`
         }
       ]
     };
@@ -892,8 +898,8 @@ export class DeepMemoryServer {
       before: typeof args.before === 'string' ? args.before : undefined
     };
 
-    const deletedCount = await this.withTimeout(
-      this.sqliteProvider.deleteMemories(options as any)
+    const deletedCount = await this.withTimeout<number>(
+      this.provider.deleteMemories(options as any)
     );
 
     return {
@@ -939,8 +945,8 @@ export class DeepMemoryServer {
       force: !!args.force
     };
 
-    const updatedCount = await this.withTimeout(
-      this.sqliteProvider.updateMemories(options as any)
+    const updatedCount = await this.withTimeout<number>(
+      this.provider.updateMemories(options as any)
     );
 
     return {
@@ -954,8 +960,8 @@ export class DeepMemoryServer {
   }
 
   private async handleLoadAllMemory() {
-    const entries = await this.withTimeout(
-      this.sqliteProvider.getAllMemories()
+    const entries = await this.withTimeout<MemoryEntry[]>(
+      this.provider.getAllMemories()
     );
 
     if (entries.length === 0) {
@@ -1010,7 +1016,7 @@ export class DeepMemoryServer {
           const req = JSON.parse(line);
           if (req?.params?.name === 'add_memory') {
             const args = req.params.arguments || {};
-            await this.sqliteProvider.addMemory({
+            await this.provider.addMemory({
               content: args.content,
               tags: Array.isArray(args.tags) ? args.tags : [],
               context: String(args.context || ''),
@@ -1083,9 +1089,9 @@ export class DeepMemoryServer {
     try {
       console.error("Starting DeepMemory MCP Server...");
       
-      await this.withTimeout(this.sqliteProvider.initialize(), 30000);
-      this.sqliteReady = true;
-      console.error("SQLite provider initialized");
+  await this.withTimeout<void>(this.provider.initialize(), 30000);
+  this.providerReady = true;
+  console.error("Storage provider initialized");
 
       await this.drainQueue();
 
@@ -1113,7 +1119,9 @@ export class DeepMemoryServer {
         this.httpServer = null;
       }
 
-      await this.sqliteProvider.close();
+      if (this.provider && typeof this.provider.close === 'function') {
+        await this.provider.close();
+      }
       console.error("Server shutdown completed");
     } catch (error) {
       console.error("Error during shutdown:", error);
@@ -1144,7 +1152,38 @@ const isMainModule = process.argv[1] && (
 );
 
 if (isMainModule) {
-  const server = new DeepMemoryServer();
+  // Parse CLI args to optionally use MySQL provider
+  const argv = process.argv.slice(2);
+  const hasFlag = (name: string) => argv.includes(name);
+  const getFlag = (name: string) => {
+    const idx = argv.indexOf(name);
+    if (idx === -1) return undefined;
+    return argv[idx + 1];
+  };
+
+  let providerInstance: any = undefined;
+
+  if (hasFlag('--mysql')) {
+    const host = getFlag('--mysql_host') || process.env.MYSQL_HOST || 'localhost';
+    const user = getFlag('--mysql_id') || process.env.MYSQL_USER || process.env.MYSQL_ID;
+    // mysql_pwd can be intentionally empty for servers without a password
+    const passwordFlag = getFlag('--mysql_pwd');
+    const passwordEnv = process.env.MYSQL_PASSWORD || process.env.MYSQL_PWD;
+    const password = typeof passwordFlag !== 'undefined' ? passwordFlag : (typeof passwordEnv !== 'undefined' ? passwordEnv : undefined);
+    const database = getFlag('--mysql_db') || process.env.MYSQL_DATABASE || 'deepmemory';
+    const port = Number(getFlag('--mysql_port') || process.env.MYSQL_PORT || 3306);
+
+    if (!user) {
+      console.error('When using --mysql you must provide --mysql_id (or MYSQL_USER/MYSQL_ID env vars)');
+      process.exit(2);
+    }
+
+    // password may be undefined (no password). mysql2 accepts undefined/'' for no password.
+    providerInstance = new MySQLProvider({ host, user, password, database, port, waitForConnections: true, connectionLimit: 10 });
+    console.error('Using MySQL provider with host=' + host + ' user=' + user + ' db=' + database + ' (password ' + (password ? 'provided' : 'not provided') + ')');
+  }
+
+  const server = new DeepMemoryServer(providerInstance);
   globalThis.deepMemoryServer = server;
   server.run().catch(console.error);
 }

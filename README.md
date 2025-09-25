@@ -1,24 +1,58 @@
 # DeepMemory MCP
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-![version](https://img.shields.io/badge/version-1.0.1-blue.svg)
+![version](https://img.shields.io/badge/version-1.1.0-blue.svg)
 ![node](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)
+
+## Changelog
+
+### v1.1.0 — nouveautés principales
+
+- Clusters (Details Cluster)
+
+  - Nouveaux outils MCP : `create_cluster`, `search_clusters`, `get_cluster`, `add_cluster_detail`, `update_cluster`, `delete_cluster`, `link_memory_to_cluster`, `unlink_memory_from_cluster`, `get_memories_by_cluster`.
+  - Permet de regrouper des détails structurés (clé/valeur) liés à un sujet et de lier/délier des mémoires aux clusters.
+
+- Provider MySQL (optionnel)
+
+  - Nouveau provider `MySQLProvider` (basé sur `mysql2`).
+  - Démarrage en MySQL via le flag CLI `--mysql` et options : `--mysql_host`, `--mysql_id`, `--mysql_pwd` (optionnel pour les bases sans mot de passe), `--mysql_db`, `--mysql_port`.
+  - `SQLiteProvider` reste le backend par défaut.
+
+- Abstraction des providers
+
+  - Le code accepte désormais un provider injectable au démarrage, facilitant l'ajout de backend supplémentaires.
+
+- Opérations & robustesse
+
+  - Queue persistante (`~/.deepmemory/queue.jsonl`) pour accepter les requêtes `add_memory` pendant l'initialisation du stockage.
+  - HTTP fallback local (par défaut `127.0.0.1:6789`) pour health-checks et interactions simples.
+  - Meilleure gestion du démarrage/arrêt et tolérance aux bases anciennes via initialisation robuste.
+
+- Divers
+  - Améliorations des schémas d'entrée des outils MCP et des options de tri/filtrage.
+  - Prise en charge explicite des variables d'environnement (MYSQL\_\*, DEEP_MEMORY_HTTP_PORT).
+
+---
 
 DeepMemory MCP is a small Model Context Protocol (MCP) server that provides long-term memory storage for conversational agents.
 
-It stores memories locally in an SQLite database and exposes a set of MCP tools to add/search/list memories. It also provides a lightweight HTTP fallback and a simple persistent queue to accept memory writes while the DB initializes.
+It stores memories locally in an SQLite database by default and exposes a set of MCP tools to add/search/list memories. Optionally, you can start the server using a MySQL backend via CLI flags (see examples below). The server also provides a lightweight HTTP fallback and a persistent queue to accept memory writes while the DB initializes.
 
 ## Quick overview
 
-- Storage: SQLite database at `~/.deepmemory/deepmemory.db`
+- Default storage: SQLite database at `~/.deepmemory/deepmemory.db`
+- Optional MySQL provider: start with `--mysql` and provide `--mysql_host --mysql_id` (password optional)
 - Queue: `~/.deepmemory/queue.jsonl` (append-only JSONL for queued add_memory requests)
-- Default HTTP fallback: `http://127.0.0.1:6789` (configurable via `DEEP_MEMORY_HTTP_PORT`)
+- HTTP fallback: `http://127.0.0.1:6789` (configurable via `DEEP_MEMORY_HTTP_PORT`)
 
 ## Features
 
-- add/search/get/list memories via MCP tools
-- Persistent queue to accept writes before DB ready
-- Simple HTTP fallback for health checks / minimal interactions
+- MCP tools to add/search/list/update/delete memories
+- Clusters to group structured details and link memories to a subject
+- Optional MySQL backend via `MySQLProvider`
+- Persistent write queue while the DB initializes
+- Lightweight HTTP fallback for health-checks and simple interactions
 - Cross-platform (Windows / macOS / Linux)
 
 ## Installation
@@ -32,7 +66,7 @@ Install
 
 ```powershell
 git clone <repo-url>
-cd deepmemory-mcp
+cd DeepMemory-MCP
 npm install
 ```
 
@@ -54,6 +88,35 @@ Run (production)
 npm start
 ```
 
+## Usage — choose provider
+
+By default the server uses the built-in SQLite provider. To run against MySQL, pass `--mysql` and at minimum `--mysql_host` and `--mysql_id` (password is optional for servers without a password).
+
+Examples (PowerShell):
+
+Start with default SQLite:
+
+```powershell
+node "./dist/index.js"
+```
+
+Start with MySQL (no password):
+
+```powershell
+node "./dist/index.js" --mysql --mysql_host localhost --mysql_id root --mysql_db deepmemory
+```
+
+Start with MySQL (with password):
+
+```powershell
+node "./dist/index.js" --mysql --mysql_host db.example.com --mysql_id myuser --mysql_pwd mysecret --mysql_db deepmemory --mysql_port 3306
+```
+
+Environment variables supported as alternatives to flags:
+
+- MYSQL_HOST, MYSQL_USER or MYSQL_ID, MYSQL_PASSWORD or MYSQL_PWD, MYSQL_DATABASE, MYSQL_PORT
+- DEEP_MEMORY_HTTP_PORT
+
 ## Usage as an MCP Server
 
 Configure your MCP host (e.g. Jan) to start the server via stdio. Example config snippet:
@@ -71,103 +134,62 @@ Configure your MCP host (e.g. Jan) to start the server via stdio. Example config
 }
 ```
 
-## Tools (MCP)
+## Tools (MCP) — aperçu
 
-All tools use the MCP CallTool/Return format. The server advertises these tools via ListTools.
+Les outils principaux exposés par le serveur incluent :
 
-1. add_memory
+- add_memory — ajoute une mémoire (content requis)
+- search_memory — recherche avancée avec filtres (tags, context, importance, tri)
+- get_memories — récupère les dernières mémoires
+- load_all_memory — charge toutes les mémoires
+- get_memory_stats — statistique de base
+- update_memory / delete_memory — opérations CRUD
+- create_cluster / search_clusters / get_cluster / add_cluster_detail / update_cluster / delete_cluster
+- link_memory_to_cluster / unlink_memory_from_cluster / get_memories_by_cluster
 
-  Description: add a memory entry to long-term storage.
-
-  Input (JSON):
-
-  { content (string, required), tags (string[]), context (string), importance (1-10), metadata (object) }
-
-  Response: Text confirming saved ID.
-
-1. search_memory
-
-  Description: perform searches with filters.
-
-  Input (JSON):
-
-  { query, tags, context, importance_threshold, limit (default 20), sort_by, sort_order }
-
-  Response: Formatted text with found memories and counts.
-
-1. get_memories
-
-  Description: retrieve recent memories.
-
-  Input (JSON):
-
-  { limit, context, min_importance }
-
-1. load_all_memory
-
-  Description: returns all memories (no filters).
-
-1. get_memory_stats
-
-  Description: returns basic stats (totalEntries, lastModified, storage info).
+Consultez les schémas d'entrée des outils (ListTools) pour les détails JSON attendus.
 
 ## HTTP fallback (quick reference)
 
-The server exposes a local HTTP endpoint used mainly as a fallback/health-check. By default it listens on 127.0.0.1:6789. It accepts POST JSON bodies and responds with a JSON success or error.
+Le serveur expose une endpoint HTTP locale pour les vérifications de santé et interactions minimales. Par défaut : `127.0.0.1:6789`. Accepte POST JSON.
 
-Configure port with env var:
+Configurez le port via :
 
 - DEEP_MEMORY_HTTP_PORT=12345
 
 ## Storage details
 
-- Database file: `~/.deepmemory/deepmemory.db`
+- Database file (SQLite): `~/.deepmemory/deepmemory.db`
 - Queue file: `~/.deepmemory/queue.jsonl`
 
-Both files are created automatically in the user's home directory.
+Les fichiers sont créés automatiquement dans le répertoire home de l'utilisateur.
 
 ## Environment variables
 
-- DEEP_MEMORY_HTTP_PORT: port for the HTTP fallback (default 6789)
+- DEEP_MEMORY_HTTP_PORT — port pour le HTTP fallback (par défaut 6789)
+- MYSQL_HOST, MYSQL_USER / MYSQL_ID, MYSQL_PASSWORD / MYSQL_PWD, MYSQL_DATABASE, MYSQL_PORT
 
 ## Development & scripts
 
-- npm run build — compile TypeScript to dist/
-- npm start — run compiled server (node dist/index.js)
-- npm run dev — run directly from source with tsx
-- npm run clean — remove dist/
+- npm run build — compile TypeScript vers `dist/`
+- npm start — exécute le serveur compilé (node dist/index.js)
+- npm run dev — exécute directement depuis la source (tsx)
+- npm run clean — supprime `dist/`
 
 ## Troubleshooting
 
-- If the server cannot write files: check permissions on your home directory and `~/.deepmemory/`.
-- If SQLite initialization fails: ensure no other process locks the DB and Node is up to date.
-- For queued items not processed: the queue is processed after DB initialization; check `queue.jsonl` and logs.
+- Permissions d'écriture : vérifier `~/.deepmemory/` et droits sur le home.
+- Si l'initialisation SQLite échoue : vérifier que la DB n'est pas verrouillée.
+- Queue non traitée : le fichier `queue.jsonl` est vidé après traitement ; vérifiez les logs pour erreurs de parsing.
 
 ## Contributing
 
-Contributions are welcome. Typical workflow:
+Contributions bienvenues. Workflow habituel : fork → branche → PR. Merci d'ajouter des tests pour les nouvelles fonctionnalités.
 
-1. Fork
-2. Create a feature branch
-3. Implement and test
-4. Open a PR describing the change
+## Licence
 
-Please add tests for new features where appropriate.
-
-## License
-
-MIT
+MIT — voir `LICENSE`.
 
 ## Authors / Maintainers
 
-- Théo (author)
-
----
-
-Si vous voulez, je peux ajouter des sections supplémentaires : exemples d'appels HTTP, guide d'intégration avec Jan, ou docs pour le provider SQLite (schéma). Dites-moi ce que vous préférez.
-
-## Licence et réutilisation
-
-Ce projet est publié sous la licence MIT. Vous pouvez librement utiliser, copier, modifier, distribuer et intégrer ce code dans des programmes tiers, y compris pour un usage commercial, sous réserve de conserver l'avis de copyright et la licence dans les copies substantielles du logiciel.
-
-Voir le fichier `LICENSE` pour le texte complet.
+- Theorhd (author)

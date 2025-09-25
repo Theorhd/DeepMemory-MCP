@@ -1,0 +1,214 @@
+import mysql from 'mysql2/promise';
+import { MemoryEntry, SearchOptions, SearchResult, MemoryEntryWithCluster, DetailsCluster, ClusterDetail, CreateClusterOptions, UpdateClusterOptions, ClusterSearchOptions } from '../types/index.js';
+import { randomUUID } from 'crypto';
+
+export class MySQLProvider {
+  private pool: mysql.Pool | null = null;
+  private config: mysql.PoolOptions;
+
+  constructor(config: mysql.PoolOptions) {
+    this.config = config;
+  }
+
+  async initialize(): Promise<void> {
+    if (this.pool) return;
+    this.pool = mysql.createPool(this.config);
+
+    // Create tables if needed (simple DDL). Use utf8mb4 for text fields.
+    const conn = await this.pool.getConnection();
+    try {
+      await conn.query(`
+        CREATE TABLE IF NOT EXISTS memories (
+          id VARCHAR(36) PRIMARY KEY,
+          content TEXT NOT NULL,
+          tags JSON NOT NULL,
+          context VARCHAR(255) NOT NULL DEFAULT '',
+          importance INT NOT NULL DEFAULT 5,
+          timestamp DATETIME NOT NULL,
+          lastAccessed DATETIME NOT NULL,
+          accessCount INT NOT NULL DEFAULT 0,
+          metadata JSON NOT NULL,
+          clusterId VARCHAR(36)
+        )
+      `);
+
+      await conn.query(`
+        CREATE TABLE IF NOT EXISTS details_clusters (
+          id VARCHAR(36) PRIMARY KEY,
+          name VARCHAR(255) NOT NULL,
+          description TEXT NOT NULL,
+          tags JSON NOT NULL,
+          createdAt DATETIME NOT NULL,
+          updatedAt DATETIME NOT NULL,
+          metadata JSON NOT NULL
+        )
+      `);
+
+      await conn.query(`
+        CREATE TABLE IF NOT EXISTS cluster_details (
+          id VARCHAR(36) PRIMARY KEY,
+          clusterId VARCHAR(36) NOT NULL,
+          ` + "`key` VARCHAR(255) NOT NULL," + `
+          value TEXT NOT NULL,
+          type VARCHAR(32) NOT NULL DEFAULT 'text',
+          importance INT NOT NULL DEFAULT 5,
+          createdAt DATETIME NOT NULL,
+          updatedAt DATETIME NOT NULL
+        )
+      `);
+    } finally {
+      conn.release();
+    }
+  }
+
+  async close(): Promise<void> {
+    if (!this.pool) return;
+    await this.pool.end();
+    this.pool = null;
+  }
+
+  getStorageInfo(): string {
+    return `MySQL pool: ${this.pool ? 'connected' : 'not connected'}`;
+  }
+
+  // Minimal implementations: createCluster, getClusterById, addClusterDetail, searchClusters, addMemory, getMemoriesByCluster
+  async createCluster(options: CreateClusterOptions): Promise<DetailsCluster> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const id = randomUUID();
+    const now = new Date();
+    const conn = await this.pool.getConnection();
+    try {
+      await conn.query('INSERT INTO details_clusters (id, name, description, tags, createdAt, updatedAt, metadata) VALUES (?, ?, ?, ?, ?, ?, ?)', [id, options.name, options.description, JSON.stringify(options.tags || []), now.toISOString().slice(0,19).replace('T',' '), now.toISOString().slice(0,19).replace('T',' '), JSON.stringify(options.metadata || {})]);
+
+      const cluster: DetailsCluster = { id, name: options.name, description: options.description, tags: options.tags || [], createdAt: now, updatedAt: now, details: [], metadata: options.metadata || {} };
+
+      if (options.details && options.details.length > 0) {
+        for (const d of options.details) {
+          const detail = await this.addClusterDetail(id, { key: d.key, value: d.value, type: d.type || 'text', importance: d.importance || 5 });
+          cluster.details.push(detail);
+        }
+      }
+
+      return cluster;
+    } finally {
+      conn.release();
+    }
+  }
+
+  async getClusterById(id: string): Promise<DetailsCluster | null> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const conn = await this.pool.getConnection();
+    try {
+      const [rows]: any = await conn.query('SELECT * FROM details_clusters WHERE id = ?', [id]);
+      if ((rows as any[]).length === 0) return null;
+      const row = (rows as any[])[0];
+      const details = await this.getClusterDetails(id);
+      return {
+        id: row.id,
+        name: row.name,
+        description: row.description,
+        tags: JSON.parse(row.tags),
+        createdAt: new Date(row.createdAt),
+        updatedAt: new Date(row.updatedAt),
+        metadata: JSON.parse(row.metadata),
+        details
+      };
+    } finally {
+      conn.release();
+    }
+  }
+
+  async getClusterDetails(clusterId: string): Promise<ClusterDetail[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const conn = await this.pool.getConnection();
+    try {
+      const [rows]: any = await conn.query('SELECT * FROM cluster_details WHERE clusterId = ? ORDER BY importance DESC, createdAt ASC', [clusterId]);
+      return (rows as any[]).map(r => ({ id: r.id, key: r.key, value: r.value, type: r.type, importance: r.importance, createdAt: new Date(r.createdAt), updatedAt: new Date(r.updatedAt) } as ClusterDetail));
+    } finally {
+      conn.release();
+    }
+  }
+
+  async addClusterDetail(clusterId: string, detail: { key: string; value: string; type: string; importance: number }): Promise<ClusterDetail> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const id = randomUUID();
+    const now = new Date();
+    const conn = await this.pool.getConnection();
+    try {
+      await conn.query('INSERT INTO cluster_details (id, clusterId, `key`, value, type, importance, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', [id, clusterId, detail.key, detail.value, detail.type, detail.importance, now.toISOString().slice(0,19).replace('T',' '), now.toISOString().slice(0,19).replace('T',' ')]);
+      await conn.query('UPDATE details_clusters SET updatedAt = ? WHERE id = ?', [now.toISOString().slice(0,19).replace('T',' '), clusterId]);
+      return { id, key: detail.key, value: detail.value, type: detail.type as any, importance: detail.importance, createdAt: now, updatedAt: now };
+    } finally {
+      conn.release();
+    }
+  }
+
+  async searchClusters(options: ClusterSearchOptions): Promise<DetailsCluster[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+    let sql = 'SELECT * FROM details_clusters WHERE 1=1';
+    const params: any[] = [];
+    if (options.query) { sql += ' AND (name LIKE ? OR description LIKE ?)'; params.push(`%${options.query}%`, `%${options.query}%`); }
+    if (options.limit) { sql += ' LIMIT ?'; params.push(options.limit); }
+    const conn = await this.pool.getConnection();
+    try {
+      const [rows]: any = await conn.query(sql, params);
+      const clusters: DetailsCluster[] = [];
+      for (const row of rows) {
+        const details = await this.getClusterDetails(row.id);
+        clusters.push({ id: row.id, name: row.name, description: row.description, tags: JSON.parse(row.tags), createdAt: new Date(row.createdAt), updatedAt: new Date(row.updatedAt), metadata: JSON.parse(row.metadata), details });
+      }
+      return clusters;
+    } finally {
+      conn.release();
+    }
+  }
+
+  // Memory methods: implement a few required ones used by server
+  async addMemory(memory: Omit<MemoryEntry, 'id' | 'timestamp' | 'lastAccessed' | 'accessCount'>, id?: string): Promise<MemoryEntry> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const entry: MemoryEntry = {
+      id: id || randomUUID(),
+      content: memory.content,
+      tags: memory.tags || [],
+      context: memory.context || '',
+      importance: memory.importance || 5,
+      timestamp: new Date(),
+      lastAccessed: new Date(),
+      accessCount: 0,
+      metadata: memory.metadata || {},
+      clusterId: memory.clusterId
+    };
+    const conn = await this.pool.getConnection();
+    try {
+      await conn.query('INSERT INTO memories (id, content, tags, context, importance, timestamp, lastAccessed, accessCount, metadata, clusterId) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [entry.id, entry.content, JSON.stringify(entry.tags), entry.context, entry.importance, entry.timestamp.toISOString().slice(0,19).replace('T',' '), entry.lastAccessed.toISOString().slice(0,19).replace('T',' '), entry.accessCount, JSON.stringify(entry.metadata), entry.clusterId || null]);
+      return entry;
+    } finally {
+      conn.release();
+    }
+  }
+
+  async getMemoriesByCluster(clusterId: string): Promise<MemoryEntry[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const conn = await this.pool.getConnection();
+    try {
+      const [rows]: any = await conn.query('SELECT * FROM memories WHERE clusterId = ? ORDER BY importance DESC', [clusterId]);
+      return (rows as any[]).map(r => ({ id: r.id, content: r.content, tags: JSON.parse(r.tags), context: r.context, importance: r.importance, timestamp: new Date(r.timestamp), lastAccessed: new Date(r.lastAccessed), accessCount: r.accessCount, metadata: JSON.parse(r.metadata), clusterId: r.clusterId }));
+    } finally {
+      conn.release();
+    }
+  }
+
+  // Stubs for other methods used by server - simple implementations or rejections
+  async searchMemories(options: SearchOptions): Promise<SearchResult> { throw new Error('Not implemented in MySQLProvider'); }
+  async getRecentMemories(limit: number = 20): Promise<MemoryEntry[]> { throw new Error('Not implemented in MySQLProvider'); }
+  async getAllMemories(): Promise<MemoryEntry[]> { throw new Error('Not implemented in MySQLProvider'); }
+  async getStats(): Promise<{ totalEntries: number; lastModified: Date | null; totalClusters: number }> { throw new Error('Not implemented in MySQLProvider'); }
+  async deleteMemories(options: any): Promise<number> { throw new Error('Not implemented in MySQLProvider'); }
+  async updateMemories(options: any): Promise<number> { throw new Error('Not implemented in MySQLProvider'); }
+  async updateCluster(clusterId: string, options: UpdateClusterOptions): Promise<DetailsCluster | null> { throw new Error('Not implemented in MySQLProvider'); }
+  async updateClusterDetail(detailId: string, update: any): Promise<ClusterDetail | null> { throw new Error('Not implemented in MySQLProvider'); }
+  async deleteClusterDetail(detailId: string): Promise<number> { throw new Error('Not implemented in MySQLProvider'); }
+  async linkMemoryToCluster(memoryId: string, clusterId: string): Promise<boolean> { throw new Error('Not implemented in MySQLProvider'); }
+  async unlinkMemoryFromCluster(memoryId: string): Promise<boolean> { throw new Error('Not implemented in MySQLProvider'); }
+
+}
