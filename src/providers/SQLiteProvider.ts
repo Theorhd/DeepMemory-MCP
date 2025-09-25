@@ -224,7 +224,8 @@ export class SQLiteProvider {
   async getRecentMemories(limit: number = 20): Promise<MemoryEntry[]> {
     if (!this.db) throw new Error('Database not initialized');
 
-    const sql = 'SELECT * FROM memories ORDER BY timestamp DESC LIMIT ?';
+    // Return memories ordered by importance from highest to lowest
+    const sql = 'SELECT * FROM memories ORDER BY importance DESC LIMIT ?';
 
     return new Promise((resolve, reject) => {
       this.db!.all(sql, [limit], (err, rows: any[]) => {
@@ -254,7 +255,7 @@ export class SQLiteProvider {
   async getAllMemories(): Promise<MemoryEntry[]> {
     if (!this.db) throw new Error('Database not initialized');
 
-    const sql = 'SELECT * FROM memories ORDER BY timestamp DESC';
+    const sql = 'SELECT * FROM memories ORDER BY importance DESC';
 
     return new Promise((resolve, reject) => {
       this.db!.all(sql, [], (err, rows: any[]) => {
