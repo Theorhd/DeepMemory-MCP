@@ -1,11 +1,16 @@
 {
-  "name": "deepmemory-mcp",
+  "name": "@theorhd/deepmemorymcp",
   "version": "1.1.0",
   "description": "Model Context Protocol server for long-term memory management with SQLite storage",
   "type": "module",
   "main": "dist/index.js",
-  "bin": {
-    "deepmemory-mcp": "dist/index.js"
+  "bin": "bin/cli.js",
+  "files": [
+    "dist",
+    "bin"
+  ],
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "tsc",
@@ -25,9 +30,10 @@
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^0.5.0",
+    "@theorhd/deepmemorymcp": "^1.1.0",
     "@types/sqlite3": "^3.1.11",
-    "sqlite3": "^5.1.7",
     "mysql2": "^3.3.0",
+    "sqlite3": "^5.1.7",
     "uuid": "^9.0.0"
   },
   "devDependencies": {
