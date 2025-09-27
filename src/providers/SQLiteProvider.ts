@@ -1,9 +1,9 @@
-import sqlite3 from 'sqlite3';
+import Database from 'better-sqlite3';
 import { MemoryEntry, SearchOptions, SearchResult, MemoryEntryWithCluster, DetailsCluster, ClusterDetail, CreateClusterOptions, UpdateClusterOptions, ClusterSearchOptions } from '../types/index.js';
 import { randomUUID } from 'crypto';
 
 export class SQLiteProvider {
-  private db: sqlite3.Database | null = null;
+  private db: any | null = null;
   private dbPath: string;
   private isInitializing = false;
   private initPromise: Promise<void> | null = null;
@@ -23,31 +23,27 @@ export class SQLiteProvider {
 
     this.isInitializing = true;
     this.initPromise = new Promise((resolve, reject) => {
-      this.db = new sqlite3.Database(this.dbPath, sqlite3.OPEN_READWRITE | sqlite3.OPEN_CREATE, (err) => {
-        if (err) {
-          console.error('Error opening database:', err);
-          this.isInitializing = false;
-          reject(err);
-          return;
-        }
-
+      try {
+        this.db = new Database(this.dbPath);
         console.error(`SQLite database connected: ${this.dbPath}`);
-        this.createTables()
-          .then(() => {
-            this.isInitializing = false;
-            resolve();
-          })
-          .catch((error) => {
-            this.isInitializing = false;
-            reject(error);
-          });
-      });
+        
+        // Enable foreign keys
+        this.db.pragma('foreign_keys = ON');
+        
+        this.createTables();
+        this.isInitializing = false;
+        resolve();
+      } catch (err) {
+        console.error('Error opening database:', err);
+        this.isInitializing = false;
+        reject(err);
+      }
     });
 
     return this.initPromise;
   }
 
-  private async createTables(): Promise<void> {
+  private createTables(): void {
     if (!this.db) throw new Error('Database not initialized');
 
     const memoriesTable = `
@@ -92,37 +88,18 @@ export class SQLiteProvider {
       )
     `;
 
-    return new Promise((resolve, reject) => {
-      let tableCount = 0;
-      const tables = [memoriesTable, clustersTable, clusterDetailsTable];
+    // Execute table creation
+    this.db.exec(memoriesTable);
+    this.db.exec(clustersTable);
+    this.db.exec(clusterDetailsTable);
 
-      const createNextTable = () => {
-        if (tableCount >= tables.length) {
-          this.createIndexes()
-            .then(() => {
-              console.error('Database tables and indexes created');
-              resolve();
-            })
-            .catch(reject);
-          return;
-        }
-
-        this.db!.run(tables[tableCount], (err) => {
-          if (err) {
-            console.error(`Error creating table ${tableCount}:`, err);
-            reject(err);
-            return;
-          }
-          tableCount++;
-          createNextTable();
-        });
-      };
-
-      createNextTable();
-    });
+    this.createIndexes();
+    console.error('Database tables and indexes created');
   }
 
-  private async createIndexes(): Promise<void> {
+  private createIndexes(): void {
+    if (!this.db) throw new Error('Database not initialized');
+
     const indexes = [
       'CREATE INDEX IF NOT EXISTS idx_memories_timestamp ON memories(timestamp)',
       'CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance)',
@@ -135,38 +112,20 @@ export class SQLiteProvider {
       'CREATE INDEX IF NOT EXISTS idx_cluster_details_key ON cluster_details(key)'
     ];
 
-    return new Promise((resolve, reject) => {
-      let indexCount = 0;
-      const createNextIndex = () => {
-        if (indexCount >= indexes.length) {
-          resolve();
-          return;
+    for (const indexSql of indexes) {
+      try {
+        this.db.exec(indexSql);
+      } catch (err: any) {
+        const msg = String(err && (err.message || err));
+        if (/no such column/i.test(msg) || /no such table/i.test(msg)) {
+          console.warn(`Skipping index due to missing column/table: ${msg}`);
+        } else {
+          console.error('Error creating index:', err);
+          throw err;
         }
-
-        const sql = indexes[indexCount];
-        this.db!.run(sql, (err) => {
-          if (err) {
-            const msg = String(err && (err.message || err));
-            if (/no such column/i.test(msg) || /no such table/i.test(msg)) {
-              console.warn(`Skipping index ${indexCount} due to missing column/table: ${msg}`);
-              indexCount++;
-              createNextIndex();
-              return;
-            }
-
-            console.error(`Error creating index ${indexCount}:`, err);
-            reject(err);
-            return;
-          }
-          indexCount++;
-          createNextIndex();
-        });
-      };
-
-      createNextIndex();
-    });
+      }
+    }
   }
-
 
   async createCluster(options: CreateClusterOptions): Promise<DetailsCluster> {
     if (!this.db) throw new Error('Database not initialized');
@@ -182,10 +141,10 @@ export class SQLiteProvider {
       metadata: options.metadata || {}
     };
 
-    const insertClusterSql = `
+    const insertClusterStmt = this.db.prepare(`
       INSERT INTO details_clusters (id, name, description, tags, createdAt, updatedAt, metadata)
       VALUES (?, ?, ?, ?, ?, ?, ?)
-    `;
+    `);
 
     const clusterParams = [
       cluster.id,
@@ -197,98 +156,75 @@ export class SQLiteProvider {
       JSON.stringify(cluster.metadata)
     ];
 
-    return new Promise((resolve, reject) => {
-      this.db!.run(insertClusterSql, clusterParams, async (err) => {
-        if (err) {
-          console.error('Error creating cluster:', err);
-          reject(err);
-          return;
-        }
+    try {
+      insertClusterStmt.run(...clusterParams);
 
-        if (options.details && options.details.length > 0) {
-          try {
-            for (const detail of options.details) {
-              await this.addClusterDetail(cluster.id, {
-                key: detail.key,
-                value: detail.value,
-                type: detail.type || 'text',
-                importance: detail.importance || 5
-              });
-            }
-            const fullCluster = await this.getClusterById(cluster.id);
-            resolve(fullCluster!);
-          } catch (error) {
-            reject(error);
-          }
-        } else {
-          resolve(cluster);
+      if (options.details && options.details.length > 0) {
+        for (const detail of options.details) {
+          await this.addClusterDetail(cluster.id, {
+            key: detail.key,
+            value: detail.value,
+            type: detail.type || 'text',
+            importance: detail.importance || 5
+          });
         }
-      });
-    });
+        const fullCluster = await this.getClusterById(cluster.id);
+        return fullCluster!;
+      } else {
+        return cluster;
+      }
+    } catch (error) {
+      console.error('Error creating cluster:', error);
+      throw error;
+    }
   }
 
   async getClusterById(id: string): Promise<DetailsCluster | null> {
     if (!this.db) throw new Error('Database not initialized');
 
-    return new Promise((resolve, reject) => {
-      const sql = 'SELECT * FROM details_clusters WHERE id = ?';
-      this.db!.get(sql, [id], async (err, row: any) => {
-        if (err) {
-          console.error('Error getting cluster:', err);
-          reject(err);
-          return;
-        }
+    const stmt = this.db.prepare('SELECT * FROM details_clusters WHERE id = ?');
+    const row = stmt.get(id) as any;
 
-        if (!row) {
-          resolve(null);
-          return;
-        }
+    if (!row) {
+      return null;
+    }
 
-        try {
-          const details = await this.getClusterDetails(id);
-          const cluster: DetailsCluster = {
-            id: row.id,
-            name: row.name,
-            description: row.description,
-            tags: JSON.parse(row.tags),
-            createdAt: new Date(row.createdAt),
-            updatedAt: new Date(row.updatedAt),
-            metadata: JSON.parse(row.metadata),
-            details
-          };
-          resolve(cluster);
-        } catch (error) {
-          reject(error);
-        }
-      });
-    });
+    try {
+      const details = await this.getClusterDetails(id);
+      const cluster: DetailsCluster = {
+        id: row.id,
+        name: row.name,
+        description: row.description,
+        tags: JSON.parse(row.tags),
+        createdAt: new Date(row.createdAt),
+        updatedAt: new Date(row.updatedAt),
+        metadata: JSON.parse(row.metadata),
+        details
+      };
+      return cluster;
+    } catch (error) {
+      console.error('Error getting cluster:', error);
+      throw error;
+    }
   }
 
   async getClusterDetails(clusterId: string): Promise<ClusterDetail[]> {
     if (!this.db) throw new Error('Database not initialized');
 
-    return new Promise((resolve, reject) => {
-      const sql = 'SELECT * FROM cluster_details WHERE clusterId = ? ORDER BY importance DESC, createdAt ASC';
-      this.db!.all(sql, [clusterId], (err, rows: any[]) => {
-        if (err) {
-          console.error('Error getting cluster details:', err);
-          reject(err);
-          return;
-        }
+    const stmt = this.db.prepare('SELECT * FROM cluster_details WHERE clusterId = ? ORDER BY importance DESC, createdAt ASC');
+    const rows = stmt.all(clusterId) as any[];
 
-        const details: ClusterDetail[] = rows.map(row => ({
-          id: row.id,
-          key: row.key,
-          value: row.value,
-          type: row.type as any,
-          importance: row.importance,
-          createdAt: new Date(row.createdAt),
-          updatedAt: new Date(row.updatedAt)
-        }));
+    const details: ClusterDetail[] = rows.map(row => ({
+      id: row.id,
+      key: row.key,
+      value: row.value,
+      type: row.type as any,
+      importance: row.importance,
+      createdAt: new Date(row.createdAt),
+      updatedAt: new Date(row.updatedAt)
+    }));
 
-        resolve(details);
-      });
-    });
+    return details;
   }
 
   async addClusterDetail(clusterId: string, detail: {
@@ -309,10 +245,10 @@ export class SQLiteProvider {
       updatedAt: new Date()
     };
 
-    const sql = `
+    const stmt = this.db.prepare(`
       INSERT INTO cluster_details (id, clusterId, key, value, type, importance, createdAt, updatedAt)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `;
+    `);
 
     const params = [
       clusterDetail.id,
@@ -325,18 +261,14 @@ export class SQLiteProvider {
       clusterDetail.updatedAt.toISOString()
     ];
 
-    return new Promise((resolve, reject) => {
-      this.db!.run(sql, params, async (err) => {
-        if (err) {
-          console.error('Error adding cluster detail:', err);
-          reject(err);
-          return;
-        }
-
-        await this.updateClusterTimestamp(clusterId).catch(console.error);
-        resolve(clusterDetail);
-      });
-    });
+    try {
+      stmt.run(...params);
+      await this.updateClusterTimestamp(clusterId);
+      return clusterDetail;
+    } catch (error) {
+      console.error('Error adding cluster detail:', error);
+      throw error;
+    }
   }
 
   async searchClusters(options: ClusterSearchOptions): Promise<DetailsCluster[]> {
@@ -365,53 +297,43 @@ export class SQLiteProvider {
       params.push(options.limit);
     }
 
-    return new Promise((resolve, reject) => {
-      this.db!.all(sql, params, async (err, rows: any[]) => {
-        if (err) {
-          console.error('Error searching clusters:', err);
-          reject(err);
-          return;
-        }
+    try {
+      const stmt = this.db.prepare(sql);
+      const rows = stmt.all(...params) as any[];
 
-        try {
-          const clusters: DetailsCluster[] = [];
-          for (const row of rows) {
-            const details = await this.getClusterDetails(row.id);
-            clusters.push({
-              id: row.id,
-              name: row.name,
-              description: row.description,
-              tags: JSON.parse(row.tags),
-              createdAt: new Date(row.createdAt),
-              updatedAt: new Date(row.updatedAt),
-              metadata: JSON.parse(row.metadata),
-              details
-            });
-          }
-          resolve(clusters);
-        } catch (error) {
-          reject(error);
-        }
-      });
-    });
+      const clusters: DetailsCluster[] = [];
+      for (const row of rows) {
+        const details = await this.getClusterDetails(row.id);
+        clusters.push({
+          id: row.id,
+          name: row.name,
+          description: row.description,
+          tags: JSON.parse(row.tags),
+          createdAt: new Date(row.createdAt),
+          updatedAt: new Date(row.updatedAt),
+          metadata: JSON.parse(row.metadata),
+          details
+        });
+      }
+      return clusters;
+    } catch (error) {
+      console.error('Error searching clusters:', error);
+      throw error;
+    }
   }
 
   private async updateClusterTimestamp(clusterId: string): Promise<void> {
     if (!this.db) return;
 
-    const sql = 'UPDATE details_clusters SET updatedAt = ? WHERE id = ?';
+    const stmt = this.db.prepare('UPDATE details_clusters SET updatedAt = ? WHERE id = ?');
     const params = [new Date().toISOString(), clusterId];
 
-    return new Promise((resolve) => {
-      this.db!.run(sql, params, (err) => {
-        if (err) {
-          console.error('Error updating cluster timestamp:', err);
-        }
-        resolve();
-      });
-    });
+    try {
+      stmt.run(...params);
+    } catch (error) {
+      console.error('Error updating cluster timestamp:', error);
+    }
   }
-
 
   async addMemory(memory: Omit<MemoryEntry, 'id' | 'timestamp' | 'lastAccessed' | 'accessCount'>, id?: string): Promise<MemoryEntry> {
     if (!this.db) throw new Error('Database not initialized');
@@ -429,10 +351,10 @@ export class SQLiteProvider {
       clusterId: memory.clusterId
     };
 
-    const sql = `
+    const stmt = this.db.prepare(`
       INSERT INTO memories (id, content, tags, context, importance, timestamp, lastAccessed, accessCount, metadata, clusterId)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `;
+    `);
 
     const params = [
       entry.id,
@@ -447,16 +369,13 @@ export class SQLiteProvider {
       entry.clusterId || null
     ];
 
-    return new Promise((resolve, reject) => {
-      this.db!.run(sql, params, function(err) {
-        if (err) {
-          console.error('Error adding memory:', err);
-          reject(err);
-          return;
-        }
-        resolve(entry);
-      });
-    });
+    try {
+      stmt.run(...params);
+      return entry;
+    } catch (error) {
+      console.error('Error adding memory:', error);
+      throw error;
+    }
   }
 
   async searchMemories(options: SearchOptions): Promise<SearchResult> {
@@ -496,154 +415,114 @@ export class SQLiteProvider {
       params.push(options.limit);
     }
 
-    return new Promise((resolve, reject) => {
-      this.db!.all(sql, params, async (err, rows: any[]) => {
-        if (err) {
-          console.error('Error searching memories:', err);
-          reject(err);
-          return;
+    try {
+      const stmt = this.db.prepare(sql);
+      const rows = stmt.all(...params) as any[];
+
+      const entries: MemoryEntryWithCluster[] = [];
+      
+      for (const row of rows) {
+        const entry: MemoryEntryWithCluster = {
+          id: row.id,
+          content: row.content,
+          tags: JSON.parse(row.tags),
+          context: row.context,
+          importance: row.importance,
+          timestamp: new Date(row.timestamp),
+          lastAccessed: new Date(row.lastAccessed),
+          accessCount: row.accessCount,
+          metadata: JSON.parse(row.metadata),
+          clusterId: row.clusterId
+        };
+
+        if (options.includeClusterDetails && row.clusterId) {
+          const cluster = await this.getClusterById(row.clusterId);
+          entry.cluster = cluster ?? undefined;
         }
 
-        try {
-          const entries: MemoryEntryWithCluster[] = [];
-          
-          for (const row of rows) {
-            const entry: MemoryEntryWithCluster = {
-              id: row.id,
-              content: row.content,
-              tags: JSON.parse(row.tags),
-              context: row.context,
-              importance: row.importance,
-              timestamp: new Date(row.timestamp),
-              lastAccessed: new Date(row.lastAccessed),
-              accessCount: row.accessCount,
-              metadata: JSON.parse(row.metadata),
-              clusterId: row.clusterId
-            };
+        entries.push(entry);
+      }
 
-            if (options.includeClusterDetails && row.clusterId) {
-              const cluster = await this.getClusterById(row.clusterId);
-              entry.cluster = cluster ?? undefined;
-            }
+      const searchTime = Date.now() - startTime;
 
-            entries.push(entry);
-          }
+      if (entries.length > 0) {
+        await this.updateAccessCount(entries.map(e => e.id));
+      }
 
-          const searchTime = Date.now() - startTime;
-
-          if (entries.length > 0) {
-            this.updateAccessCount(entries.map(e => e.id)).catch(err => {
-              console.error('Error updating access count:', err);
-            });
-          }
-
-          resolve({
-            entries,
-            totalFound: entries.length,
-            searchTime
-          });
-        } catch (error) {
-          reject(error);
-        }
-      });
-    });
+      return {
+        entries,
+        totalFound: entries.length,
+        searchTime
+      };
+    } catch (error) {
+      console.error('Error searching memories:', error);
+      throw error;
+    }
   }
 
   async getRecentMemories(limit: number = 20): Promise<MemoryEntry[]> {
     if (!this.db) throw new Error('Database not initialized');
 
-    const sql = 'SELECT * FROM memories ORDER BY importance DESC LIMIT ?';
+    const stmt = this.db.prepare('SELECT * FROM memories ORDER BY importance DESC LIMIT ?');
+    const rows = stmt.all(limit) as any[];
 
-    return new Promise((resolve, reject) => {
-      this.db!.all(sql, [limit], (err, rows: any[]) => {
-        if (err) {
-          console.error('Error getting recent memories:', err);
-          reject(err);
-          return;
-        }
+    const entries: MemoryEntry[] = rows.map(row => ({
+      id: row.id,
+      content: row.content,
+      tags: JSON.parse(row.tags),
+      context: row.context,
+      importance: row.importance,
+      timestamp: new Date(row.timestamp),
+      lastAccessed: new Date(row.lastAccessed),
+      accessCount: row.accessCount,
+      metadata: JSON.parse(row.metadata),
+      clusterId: row.clusterId
+    }));
 
-        const entries: MemoryEntry[] = rows.map(row => ({
-          id: row.id,
-          content: row.content,
-          tags: JSON.parse(row.tags),
-          context: row.context,
-          importance: row.importance,
-          timestamp: new Date(row.timestamp),
-          lastAccessed: new Date(row.lastAccessed),
-          accessCount: row.accessCount,
-          metadata: JSON.parse(row.metadata),
-          clusterId: row.clusterId
-        }));
-
-        resolve(entries);
-      });
-    });
+    return entries;
   }
 
   async getAllMemories(): Promise<MemoryEntry[]> {
     if (!this.db) throw new Error('Database not initialized');
 
-    const sql = 'SELECT * FROM memories ORDER BY importance DESC';
+    const stmt = this.db.prepare('SELECT * FROM memories ORDER BY importance DESC');
+    const rows = stmt.all() as any[];
 
-    return new Promise((resolve, reject) => {
-      this.db!.all(sql, [], (err, rows: any[]) => {
-        if (err) {
-          console.error('Error getting all memories:', err);
-          reject(err);
-          return;
-        }
+    const entries: MemoryEntry[] = rows.map(row => ({
+      id: row.id,
+      content: row.content,
+      tags: JSON.parse(row.tags),
+      context: row.context,
+      importance: row.importance,
+      timestamp: new Date(row.timestamp),
+      lastAccessed: new Date(row.lastAccessed),
+      accessCount: row.accessCount,
+      metadata: JSON.parse(row.metadata),
+      clusterId: row.clusterId
+    }));
 
-        const entries: MemoryEntry[] = rows.map(row => ({
-          id: row.id,
-          content: row.content,
-          tags: JSON.parse(row.tags),
-          context: row.context,
-          importance: row.importance,
-          timestamp: new Date(row.timestamp),
-          lastAccessed: new Date(row.lastAccessed),
-          accessCount: row.accessCount,
-          metadata: JSON.parse(row.metadata),
-          clusterId: row.clusterId
-        }));
-
-        resolve(entries);
-      });
-    });
+    return entries;
   }
 
   async getStats(): Promise<{ totalEntries: number; lastModified: Date | null; totalClusters: number }> {
     if (!this.db) throw new Error('Database not initialized');
 
-    return new Promise((resolve, reject) => {
-      const memoriesSql = 'SELECT COUNT(*) as count, MAX(timestamp) as lastModified FROM memories';
-      const clustersSql = 'SELECT COUNT(*) as count FROM details_clusters';
+    const memoriesStmt = this.db.prepare('SELECT COUNT(*) as count, MAX(timestamp) as lastModified FROM memories');
+    const clustersStmt = this.db.prepare('SELECT COUNT(*) as count FROM details_clusters');
 
-      this.db!.get(memoriesSql, [], (err, memoriesRow: any) => {
-        if (err) {
-          console.error('Error getting memories stats:', err);
-          reject(err);
-          return;
-        }
+    const memoriesRow = memoriesStmt.get() as any;
+    const clustersRow = clustersStmt.get() as any;
 
-        this.db!.get(clustersSql, [], (err, clustersRow: any) => {
-          if (err) {
-            console.error('Error getting clusters stats:', err);
-            reject(err);
-            return;
-          }
-
-          resolve({
-            totalEntries: memoriesRow.count,
-            lastModified: memoriesRow.lastModified ? new Date(memoriesRow.lastModified) : null,
-            totalClusters: clustersRow.count
-          });
-        });
-      });
-    });
+    return {
+      totalEntries: memoriesRow.count,
+      lastModified: memoriesRow.lastModified ? new Date(memoriesRow.lastModified) : null,
+      totalClusters: clustersRow.count
+    };
   }
 
   async deleteMemories(options: { id?: string; tags?: string[]; context?: string; query?: string; importanceLessThan?: number; before?: string; force?: boolean }): Promise<number> {
     if (!this.db) throw new Error('Database not initialized');
+    
     const hasFilters = !!(options.id || (options.tags && options.tags.length > 0) || options.context || options.query || typeof options.importanceLessThan === 'number' || options.before);
     if (!hasFilters && !options.force) {
       throw new Error('Refusing to delete all memories without filters. Provide at least one filter or set force=true.');
@@ -684,16 +563,14 @@ export class SQLiteProvider {
       }
     }
 
-    return new Promise((resolve, reject) => {
-      this.db!.run(sql, params, function(this: any, err: any) {
-        if (err) {
-          console.error('Error deleting memories:', err);
-          reject(err);
-          return;
-        }
-        resolve(typeof this.changes === 'number' ? this.changes : 0);
-      });
-    });
+    try {
+      const stmt = this.db.prepare(sql);
+      const result = stmt.run(...params);
+      return result.changes;
+    } catch (error) {
+      console.error('Error deleting memories:', error);
+      throw error;
+    }
   }
 
   async updateMemories(options: { id?: string; filters?: { tags?: string[]; query?: string; context?: string; importanceLessThan?: number; before?: string }; update: { content?: string; tags?: string[]; context?: string; importance?: number; metadata?: Record<string, any>; clusterId?: string }; force?: boolean }): Promise<number> {
@@ -779,16 +656,14 @@ export class SQLiteProvider {
       }
     }
 
-    return new Promise((resolve, reject) => {
-      this.db!.run(sql, params, function(this: any, err: any) {
-        if (err) {
-          console.error('Error updating memories:', err);
-          reject(err);
-          return;
-        }
-        resolve(typeof this.changes === 'number' ? this.changes : 0);
-      });
-    });
+    try {
+      const stmt = this.db.prepare(sql);
+      const result = stmt.run(...params);
+      return result.changes;
+    } catch (error) {
+      console.error('Error updating memories:', error);
+      throw error;
+    }
   }
 
   private async updateAccessCount(ids: string[]): Promise<void> {
@@ -803,40 +678,33 @@ export class SQLiteProvider {
 
     const params = [new Date().toISOString(), ...ids];
 
-    return new Promise((resolve, reject) => {
-      this.db!.run(sql, params, function(err) {
-        if (err) {
-          console.error('Error updating access count:', err);
-        }
-        resolve();
-      });
-    });
+    try {
+      const stmt = this.db.prepare(sql);
+      stmt.run(...params);
+    } catch (error) {
+      console.error('Error updating access count:', error);
+    }
   }
-
 
   async deleteCluster(clusterId: string): Promise<number> {
     if (!this.db) throw new Error('Database not initialized');
 
-    return new Promise((resolve, reject) => {
-      const updateMemoriesSql = 'UPDATE memories SET clusterId = NULL WHERE clusterId = ?';
-      this.db!.run(updateMemoriesSql, [clusterId], (err) => {
-        if (err) {
-          console.error('Error updating memories cluster association:', err);
-          reject(err);
-          return;
-        }
+    try {
+      // Start transaction
+      const updateMemoriesStmt = this.db.prepare('UPDATE memories SET clusterId = NULL WHERE clusterId = ?');
+      const deleteClusterStmt = this.db.prepare('DELETE FROM details_clusters WHERE id = ?');
 
-        const deleteClusterSql = 'DELETE FROM details_clusters WHERE id = ?';
-        this.db!.run(deleteClusterSql, [clusterId], function(this: any, err: any) {
-          if (err) {
-            console.error('Error deleting cluster:', err);
-            reject(err);
-            return;
-          }
-          resolve(typeof this.changes === 'number' ? this.changes : 0);
-        });
+      const transaction = this.db.transaction(() => {
+        updateMemoriesStmt.run(clusterId);
+        const result = deleteClusterStmt.run(clusterId);
+        return result.changes;
       });
-    });
+
+      return transaction();
+    } catch (error) {
+      console.error('Error deleting cluster:', error);
+      throw error;
+    }
   }
 
   async updateCluster(clusterId: string, options: UpdateClusterOptions): Promise<DetailsCluster | null> {
@@ -875,27 +743,19 @@ export class SQLiteProvider {
 
     const sql = `UPDATE details_clusters SET ${setParts.join(', ')} WHERE id = ?`;
 
-    return new Promise((resolve, reject) => {
-      this.db!.run(sql, params, async function(this: any, err: any) {
-        if (err) {
-          console.error('Error updating cluster:', err);
-          reject(err);
-          return;
-        }
+    try {
+      const stmt = this.db.prepare(sql);
+      const result = stmt.run(...params);
 
-        if (this.changes === 0) {
-          resolve(null);
-          return;
-        }
+      if (result.changes === 0) {
+        return null;
+      }
 
-        try {
-          const updatedCluster = await this.getClusterById(clusterId);
-          resolve(updatedCluster);
-        } catch (error) {
-          reject(error);
-        }
-      }.bind(this));
-    });
+      return await this.getClusterById(clusterId);
+    } catch (error) {
+      console.error('Error updating cluster:', error);
+      throw error;
+    }
   }
 
   async updateClusterDetail(detailId: string, update: {
@@ -939,159 +799,120 @@ export class SQLiteProvider {
 
     const sql = `UPDATE cluster_details SET ${setParts.join(', ')} WHERE id = ?`;
 
-    return new Promise((resolve, reject) => {
-      this.db!.run(sql, params, async function(this: any, err: any) {
-        if (err) {
-          console.error('Error updating cluster detail:', err);
-          reject(err);
-          return;
-        }
+    try {
+      const updateStmt = this.db.prepare(sql);
+      const result = updateStmt.run(...params);
 
-        if (this.changes === 0) {
-          resolve(null);
-          return;
-        }
+      if (result.changes === 0) {
+        return null;
+      }
 
-        const getDetailSql = 'SELECT * FROM cluster_details WHERE id = ?';
-        this.db!.get(getDetailSql, [detailId], async (err: any, row: any) => {
-          if (err) {
-            reject(err);
-            return;
-          }
+      const getDetailStmt = this.db.prepare('SELECT * FROM cluster_details WHERE id = ?');
+      const row = getDetailStmt.get(detailId) as any;
 
-          if (!row) {
-            resolve(null);
-            return;
-          }
+      if (!row) {
+        return null;
+      }
 
-          await this.updateClusterTimestamp(row.clusterId).catch(console.error);
+      await this.updateClusterTimestamp(row.clusterId);
 
-          const detail: ClusterDetail = {
-            id: row.id,
-            key: row.key,
-            value: row.value,
-            type: row.type,
-            importance: row.importance,
-            createdAt: new Date(row.createdAt),
-            updatedAt: new Date(row.updatedAt)
-          };
+      const detail: ClusterDetail = {
+        id: row.id,
+        key: row.key,
+        value: row.value,
+        type: row.type,
+        importance: row.importance,
+        createdAt: new Date(row.createdAt),
+        updatedAt: new Date(row.updatedAt)
+      };
 
-          resolve(detail);
-        });
-      }.bind(this));
-    });
+      return detail;
+    } catch (error) {
+      console.error('Error updating cluster detail:', error);
+      throw error;
+    }
   }
 
   async deleteClusterDetail(detailId: string): Promise<number> {
     if (!this.db) throw new Error('Database not initialized');
 
-    return new Promise((resolve, reject) => {
-      const getClusterIdSql = 'SELECT clusterId FROM cluster_details WHERE id = ?';
-      this.db!.get(getClusterIdSql, [detailId], (err, row: any) => {
-        if (err) {
-          console.error('Error getting cluster ID for detail:', err);
-          reject(err);
-          return;
-        }
+    try {
+      const getClusterIdStmt = this.db.prepare('SELECT clusterId FROM cluster_details WHERE id = ?');
+      const row = getClusterIdStmt.get(detailId) as any;
+      const clusterId = row?.clusterId;
 
-        const clusterId = row?.clusterId;
+      const deleteStmt = this.db.prepare('DELETE FROM cluster_details WHERE id = ?');
+      const result = deleteStmt.run(detailId);
 
-        const sql = 'DELETE FROM cluster_details WHERE id = ?';
-        this.db!.run(sql, [detailId], async function(this: any, err: any) {
-          if (err) {
-            console.error('Error deleting cluster detail:', err);
-            reject(err);
-            return;
-          }
+      if (clusterId && result.changes > 0) {
+        await this.updateClusterTimestamp(clusterId);
+      }
 
-          if (clusterId && this.changes > 0) {
-            await this.updateClusterTimestamp(clusterId).catch(console.error);
-          }
-
-          resolve(typeof this.changes === 'number' ? this.changes : 0);
-        }.bind(this));
-      });
-    });
+      return result.changes;
+    } catch (error) {
+      console.error('Error deleting cluster detail:', error);
+      throw error;
+    }
   }
 
   async linkMemoryToCluster(memoryId: string, clusterId: string): Promise<boolean> {
     if (!this.db) throw new Error('Database not initialized');
 
-    const sql = 'UPDATE memories SET clusterId = ? WHERE id = ?';
-
-    return new Promise((resolve, reject) => {
-      this.db!.run(sql, [clusterId, memoryId], function(this: any, err: any) {
-        if (err) {
-          console.error('Error linking memory to cluster:', err);
-          reject(err);
-          return;
-        }
-        resolve(this.changes > 0);
-      });
-    });
+    try {
+      const stmt = this.db.prepare('UPDATE memories SET clusterId = ? WHERE id = ?');
+      const result = stmt.run(clusterId, memoryId);
+      return result.changes > 0;
+    } catch (error) {
+      console.error('Error linking memory to cluster:', error);
+      throw error;
+    }
   }
 
   async unlinkMemoryFromCluster(memoryId: string): Promise<boolean> {
     if (!this.db) throw new Error('Database not initialized');
 
-    const sql = 'UPDATE memories SET clusterId = NULL WHERE id = ?';
-
-    return new Promise((resolve, reject) => {
-      this.db!.run(sql, [memoryId], function(this: any, err: any) {
-        if (err) {
-          console.error('Error unlinking memory from cluster:', err);
-          reject(err);
-          return;
-        }
-        resolve(this.changes > 0);
-      });
-    });
+    try {
+      const stmt = this.db.prepare('UPDATE memories SET clusterId = NULL WHERE id = ?');
+      const result = stmt.run(memoryId);
+      return result.changes > 0;
+    } catch (error) {
+      console.error('Error unlinking memory from cluster:', error);
+      throw error;
+    }
   }
 
   async getMemoriesByCluster(clusterId: string): Promise<MemoryEntry[]> {
     if (!this.db) throw new Error('Database not initialized');
 
-    const sql = 'SELECT * FROM memories WHERE clusterId = ? ORDER BY importance DESC';
+    const stmt = this.db.prepare('SELECT * FROM memories WHERE clusterId = ? ORDER BY importance DESC');
+    const rows = stmt.all(clusterId) as any[];
 
-    return new Promise((resolve, reject) => {
-      this.db!.all(sql, [clusterId], (err, rows: any[]) => {
-        if (err) {
-          console.error('Error getting memories by cluster:', err);
-          reject(err);
-          return;
-        }
+    const entries: MemoryEntry[] = rows.map(row => ({
+      id: row.id,
+      content: row.content,
+      tags: JSON.parse(row.tags),
+      context: row.context,
+      importance: row.importance,
+      timestamp: new Date(row.timestamp),
+      lastAccessed: new Date(row.lastAccessed),
+      accessCount: row.accessCount,
+      metadata: JSON.parse(row.metadata),
+      clusterId: row.clusterId
+    }));
 
-        const entries: MemoryEntry[] = rows.map(row => ({
-          id: row.id,
-          content: row.content,
-          tags: JSON.parse(row.tags),
-          context: row.context,
-          importance: row.importance,
-          timestamp: new Date(row.timestamp),
-          lastAccessed: new Date(row.lastAccessed),
-          accessCount: row.accessCount,
-          metadata: JSON.parse(row.metadata),
-          clusterId: row.clusterId
-        }));
-
-        resolve(entries);
-      });
-    });
+    return entries;
   }
 
   async close(): Promise<void> {
     if (!this.db) return;
-    return new Promise((resolve, reject) => {
-      this.db!.close((err) => {
-        if (err) {
-          console.error('Error closing database:', err);
-          reject(err);
-          return;
-        }
-        this.db = null;
-        resolve();
-      });
-    });
+    
+    try {
+      this.db.close();
+      this.db = null;
+    } catch (error) {
+      console.error('Error closing database:', error);
+      throw error;
+    }
   }
 
   getStorageInfo(): string {
