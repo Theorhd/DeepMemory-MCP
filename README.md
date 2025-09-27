@@ -1,10 +1,34 @@
 # DeepMemory MCP
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-![version](https://img.shields.io/badge/version-1.1.1-blue.svg)
+![version](https://img.shields.io/badge/version-1.1.2-blue.svg)
 ![node](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)
 
 ## Changelog
+
+### v1.1.2 — ajout du stockage et des outils "docs" de développement
+
+- Ajout d'un stockage dédié pour les documents de développement (séparé des "memories"). Les docs sont persistés dans une table `docs` distincte afin de garder les mémoires utilisateur inchangées.
+
+- Nouvelles types et API provider : `DocEntry`, `DocSearchOptions`, `DocSearchResult` et extension de l'interface `BaseProvider` pour supporter les opérations sur les docs (addDoc, searchDocs, getRecentDocs, getAllDocs, deleteDocs, updateDocs).
+
+- Implémentation SQLite complète pour les docs dans `SQLiteProvider` : création de la table `docs`, indexes, CRUD, recherche basique et mise à jour des compteurs d'accès.
+
+- Stubs MySQL : méthodes docs présentes dans `MySQLProvider` (throw 'Not implemented') — à implémenter si vous souhaitez activer MySQL pour les docs.
+
+- Nouveaux outils MCP exposés : `add_doc`, `search_docs`, `get_docs`, `load_all_docs`, `delete_docs`, `update_docs`.
+
+  - `add_doc` accepte soit une `url` (le serveur récupère la page et en extrait texte/titre), soit du `content` brut.
+
+- Utilitaire léger `src/docs_search.ts` : récupération HTTP et extraction simple de texte/titre (implémentation minimale pour éviter d'ajouter des dépendances lourdes). Note : l'implémentation actuelle utilise l'API globale `fetch` (Node >=18). Pour une extraction plus robuste, on peut intégrer `jsdom` ou `cheerio` ultérieurement.
+
+- Mise à jour de la surface d'API MCP et documentation : nouveaux schémas d'entrée pour les outils docs exposés via ListTools.
+
+Remarques :
+
+- L'implémentation actuelle privilégie une approche simple et sans dépendances externes pour l'extraction HTML. Si vous souhaitez une extraction plus structurée (conserver headings, code blocks, etc.), je peux ajouter `jsdom`/`cheerio` et ajuster `package.json`.
+
+- Le stockage des docs est volontairement séparé des memories pour éviter tout mélange des usages et permettre des optimisations spécifiques (indexation, FTS, politique de rétention différente).
 
 ### v1.1.1 — corrections et améliorations
 
