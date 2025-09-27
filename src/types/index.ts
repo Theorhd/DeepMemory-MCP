@@ -89,3 +89,5 @@ export interface ClusterSearchOptions {
   sortBy?: 'createdAt' | 'updatedAt' | 'name';
   sortOrder?: 'asc' | 'desc';
 }
+
+export { type BaseProvider } from './BaseProvider.js';

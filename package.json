@@ -1,6 +1,6 @@
 {
   "name": "@theorhd/deepmemorymcp",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Model Context Protocol server for long-term memory management with SQLite storage",
   "type": "module",
   "main": "dist/index.js",

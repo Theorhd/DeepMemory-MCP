@@ -177,7 +177,6 @@ export class DeepMemoryServer {
     
     fs.mkdir(deepMemoryDir, { recursive: true }).catch(() => {});
     
-    // If a provider instance was passed (e.g. MySQLProvider), use it. Otherwise default to SQLiteProvider.
     if (provider) {
       this.provider = provider;
     } else {
@@ -1152,7 +1151,6 @@ const isMainModule = process.argv[1] && (
 );
 
 if (isMainModule) {
-  // Parse CLI args to optionally use MySQL provider
   const argv = process.argv.slice(2);
   const hasFlag = (name: string) => argv.includes(name);
   const getFlag = (name: string) => {
@@ -1166,7 +1164,6 @@ if (isMainModule) {
   if (hasFlag('--mysql')) {
     const host = getFlag('--mysql_host') || process.env.MYSQL_HOST || 'localhost';
     const user = getFlag('--mysql_id') || process.env.MYSQL_USER || process.env.MYSQL_ID;
-    // mysql_pwd can be intentionally empty for servers without a password
     const passwordFlag = getFlag('--mysql_pwd');
     const passwordEnv = process.env.MYSQL_PASSWORD || process.env.MYSQL_PWD;
     const password = typeof passwordFlag !== 'undefined' ? passwordFlag : (typeof passwordEnv !== 'undefined' ? passwordEnv : undefined);
@@ -1178,7 +1175,6 @@ if (isMainModule) {
       process.exit(2);
     }
 
-    // password may be undefined (no password). mysql2 accepts undefined/'' for no password.
     providerInstance = new MySQLProvider({ host, user, password, database, port, waitForConnections: true, connectionLimit: 10 });
     console.error('Using MySQL provider with host=' + host + ' user=' + user + ' db=' + database + ' (password ' + (password ? 'provided' : 'not provided') + ')');
   }

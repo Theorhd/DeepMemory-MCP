@@ -1,8 +1,8 @@
 import Database from 'better-sqlite3';
-import { MemoryEntry, SearchOptions, SearchResult, MemoryEntryWithCluster, DetailsCluster, ClusterDetail, CreateClusterOptions, UpdateClusterOptions, ClusterSearchOptions } from '../types/index.js';
+import { MemoryEntry, SearchOptions, SearchResult, MemoryEntryWithCluster, DetailsCluster, ClusterDetail, CreateClusterOptions, UpdateClusterOptions, ClusterSearchOptions, BaseProvider } from '../types/index.js';
 import { randomUUID } from 'crypto';
 
-export class SQLiteProvider {
+export class SQLiteProvider implements BaseProvider {
   private db: any | null = null;
   private dbPath: string;
   private isInitializing = false;
@@ -27,7 +27,6 @@ export class SQLiteProvider {
         this.db = new Database(this.dbPath);
         console.error(`SQLite database connected: ${this.dbPath}`);
         
-        // Enable foreign keys
         this.db.pragma('foreign_keys = ON');
         
         this.createTables();
@@ -88,7 +87,6 @@ export class SQLiteProvider {
       )
     `;
 
-    // Execute table creation
     this.db.exec(memoriesTable);
     this.db.exec(clustersTable);
     this.db.exec(clusterDetailsTable);
@@ -690,7 +688,6 @@ export class SQLiteProvider {
     if (!this.db) throw new Error('Database not initialized');
 
     try {
-      // Start transaction
       const updateMemoriesStmt = this.db.prepare('UPDATE memories SET clusterId = NULL WHERE clusterId = ?');
       const deleteClusterStmt = this.db.prepare('DELETE FROM details_clusters WHERE id = ?');
 

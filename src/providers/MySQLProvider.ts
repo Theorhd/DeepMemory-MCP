@@ -1,8 +1,8 @@
 import mysql from 'mysql2/promise';
-import { MemoryEntry, SearchOptions, SearchResult, MemoryEntryWithCluster, DetailsCluster, ClusterDetail, CreateClusterOptions, UpdateClusterOptions, ClusterSearchOptions } from '../types/index.js';
+import { MemoryEntry, SearchOptions, SearchResult, MemoryEntryWithCluster, DetailsCluster, ClusterDetail, CreateClusterOptions, UpdateClusterOptions, ClusterSearchOptions, BaseProvider } from '../types/index.js';
 import { randomUUID } from 'crypto';
 
-export class MySQLProvider {
+export class MySQLProvider implements BaseProvider {
   private pool: mysql.Pool | null = null;
   private config: mysql.PoolOptions;
 
@@ -14,7 +14,6 @@ export class MySQLProvider {
     if (this.pool) return;
     this.pool = mysql.createPool(this.config);
 
-    // Create tables if needed (simple DDL). Use utf8mb4 for text fields.
     const conn = await this.pool.getConnection();
     try {
       await conn.query(`
@@ -71,7 +70,6 @@ export class MySQLProvider {
     return `MySQL pool: ${this.pool ? 'connected' : 'not connected'}`;
   }
 
-  // Minimal implementations: createCluster, getClusterById, addClusterDetail, searchClusters, addMemory, getMemoriesByCluster
   async createCluster(options: CreateClusterOptions): Promise<DetailsCluster> {
     if (!this.pool) throw new Error('Database not initialized');
     const id = randomUUID();
@@ -163,7 +161,6 @@ export class MySQLProvider {
     }
   }
 
-  // Memory methods: implement a few required ones used by server
   async addMemory(memory: Omit<MemoryEntry, 'id' | 'timestamp' | 'lastAccessed' | 'accessCount'>, id?: string): Promise<MemoryEntry> {
     if (!this.pool) throw new Error('Database not initialized');
     const entry: MemoryEntry = {
@@ -198,7 +195,6 @@ export class MySQLProvider {
     }
   }
 
-  // Stubs for other methods used by server - simple implementations or rejections
   async searchMemories(options: SearchOptions): Promise<SearchResult> { throw new Error('Not implemented in MySQLProvider'); }
   async getRecentMemories(limit: number = 20): Promise<MemoryEntry[]> { throw new Error('Not implemented in MySQLProvider'); }
   async getAllMemories(): Promise<MemoryEntry[]> { throw new Error('Not implemented in MySQLProvider'); }
@@ -208,6 +204,7 @@ export class MySQLProvider {
   async updateCluster(clusterId: string, options: UpdateClusterOptions): Promise<DetailsCluster | null> { throw new Error('Not implemented in MySQLProvider'); }
   async updateClusterDetail(detailId: string, update: any): Promise<ClusterDetail | null> { throw new Error('Not implemented in MySQLProvider'); }
   async deleteClusterDetail(detailId: string): Promise<number> { throw new Error('Not implemented in MySQLProvider'); }
+  async deleteCluster(clusterId: string): Promise<number> { throw new Error('Not implemented in MySQLProvider'); }
   async linkMemoryToCluster(memoryId: string, clusterId: string): Promise<boolean> { throw new Error('Not implemented in MySQLProvider'); }
   async unlinkMemoryFromCluster(memoryId: string): Promise<boolean> { throw new Error('Not implemented in MySQLProvider'); }
 
