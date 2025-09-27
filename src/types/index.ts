@@ -53,6 +53,32 @@ export interface MemoryEntryWithCluster extends MemoryEntry {
   cluster?: DetailsCluster;
 }
 
+export interface DocEntry {
+  id: string;
+  url?: string;
+  title?: string;
+  content: string;
+  tags: string[];
+  timestamp: Date;
+  lastFetched: Date;
+  accessCount: number;
+  metadata?: Record<string, any>;
+}
+
+export interface DocSearchOptions {
+  query?: string;
+  tags?: string[];
+  limit?: number;
+  sortBy?: 'timestamp' | 'accessCount' | 'lastFetched';
+  sortOrder?: 'asc' | 'desc';
+}
+
+export interface DocSearchResult {
+  entries: DocEntry[];
+  totalFound: number;
+  searchTime: number;
+}
+
 export interface AddMemoryOptions {
   content: string;
   tags?: string[];

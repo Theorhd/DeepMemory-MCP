@@ -9,6 +9,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { SQLiteProvider } from './providers/SQLiteProvider.js';
 import { MySQLProvider } from './providers/MySQLProvider.js';
+import { fetchAndExtract } from './docs_search.js';
 import { SearchOptions, MemoryEntry, CreateClusterOptions, UpdateClusterOptions, ClusterSearchOptions, DetailsCluster, ClusterDetail, SearchResult } from './types/index.js';
 import * as path from 'path';
 import { promises as fs } from 'fs';
@@ -22,6 +23,7 @@ declare global {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const version = "1.1.2";
 
 export class DeepMemoryServer {
   private server: Server;
@@ -162,7 +164,7 @@ export class DeepMemoryServer {
     this.server = new Server(
       {
         name: "deepmemory-mcp",
-        version: "1.1.0",
+        version: version,
       },
       {
         capabilities: {
@@ -315,6 +317,75 @@ export class DeepMemoryServer {
           type: "object",
           properties: {},
           required: []
+        }
+      },
+      {
+        name: "add_doc",
+        description: "Add a development doc by URL or raw content into docs storage",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            url: { type: 'string', description: 'Optional: URL to fetch the doc from' },
+            content: { type: 'string', description: 'Optional: Raw content to store' },
+            title: { type: 'string', description: 'Optional: title for the doc' },
+            tags: { type: 'array', items: { type: 'string' }, default: [] },
+            metadata: { type: 'object', default: {} }
+          },
+          required: []
+        }
+      },
+      {
+        name: 'search_docs',
+        description: 'Search stored development docs',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            query: { type: 'string' },
+            tags: { type: 'array', items: { type: 'string' } },
+            limit: { type: 'number', default: 20 },
+            sort_by: { type: 'string', enum: ['timestamp', 'accessCount', 'lastFetched'], default: 'timestamp' },
+            sort_order: { type: 'string', enum: ['asc','desc'], default: 'desc' }
+          },
+          required: []
+        }
+      },
+      {
+        name: 'get_docs',
+        description: 'Get recent docs or all docs with optional limit',
+        inputSchema: { type: 'object', properties: { limit: { type: 'number', default: 20 } }, required: [] }
+      },
+      {
+        name: 'load_all_docs',
+        description: 'Load all docs from storage without filters',
+        inputSchema: { type: 'object', properties: {}, required: [] }
+      },
+      {
+        name: 'delete_docs',
+        description: 'Delete docs by id, tags, query, or before date',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            tags: { type: 'array', items: { type: 'string' } },
+            query: { type: 'string' },
+            before: { type: 'string' },
+            force: { type: 'boolean' }
+          },
+          required: []
+        }
+      },
+      {
+        name: 'update_docs',
+        description: 'Update docs fields (content, title, tags, metadata) by id or filters',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            filters: { type: 'object' },
+            update: { type: 'object' },
+            force: { type: 'boolean' }
+          },
+          required: ['update']
         }
       },
       {
@@ -632,6 +703,7 @@ export class DeepMemoryServer {
     }));
   }
 
+
   private setupHandlers(): void {
     this.server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest) => {
       const { name, arguments: args } = request.params;
@@ -695,6 +767,19 @@ export class DeepMemoryServer {
             return await this.handleUnlinkMemoryFromCluster(args);
           case "get_memories_by_cluster":
             return await this.handleGetMemoriesByCluster(args);
+
+          case 'add_doc':
+            return await this.handleAddDoc(args);
+          case 'search_docs':
+            return await this.handleSearchDocs(args);
+          case 'get_docs':
+            return await this.handleGetDocs(args);
+          case 'load_all_docs':
+            return await this.handleLoadAllDocs();
+          case 'delete_docs':
+            return await this.handleDeleteDocs(args);
+          case 'update_docs':
+            return await this.handleUpdateDocs(args);
 
           default:
             throw new Error(`Unknown tool: ${name}`);
@@ -1036,6 +1121,104 @@ export class DeepMemoryServer {
     } finally {
       this.queueProcessing = false;
     }
+  }
+
+  private async handleAddDoc(args: any) {
+    if (!args || typeof args !== 'object') throw new Error('Invalid arguments object');
+
+    const { url, content, title, tags = [], metadata = {} } = args;
+
+    let finalContent = content;
+    let finalTitle = title;
+
+    if (!finalContent && url) {
+      try {
+        const extracted = await fetchAndExtract(url);
+        finalContent = extracted.text;
+        if (!finalTitle) finalTitle = extracted.title;
+      } catch (err) {
+        throw new Error(`Failed to fetch URL: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    if (!finalContent || typeof finalContent !== 'string' || finalContent.trim().length === 0) {
+      throw new Error('Either content or a valid URL that returns content is required');
+    }
+
+    const entry = await this.withTimeout<any>(this.provider.addDoc({ url, title: finalTitle, content: finalContent, tags, metadata }));
+
+    return { content: [ { type: 'text', text: `Doc stored with ID: ${entry.id}` } ], data: entry };
+  }
+
+  private async handleSearchDocs(args: any) {
+    const options = {
+      query: typeof args.query === 'string' ? args.query : undefined,
+      tags: Array.isArray(args.tags) ? args.tags : undefined,
+      limit: Math.max(1, Math.min(200, Number(args.limit) || 20)),
+      sortBy: args.sort_by || 'timestamp',
+      sortOrder: args.sort_order || 'desc'
+    } as any;
+
+    const result = await this.withTimeout<any>(this.provider.searchDocs(options));
+
+    if (!result || result.entries.length === 0) {
+      return { content: [ { type: 'text', text: 'No docs found matching your criteria.' } ] };
+    }
+
+  const formatted = result.entries.map((e: any) => `${e.title ? e.title + ' - ' : ''}${e.url || ''}\n${e.content.slice(0, 500)}\n---`).join('\n');
+
+  return { content: [ { type: 'text', text: `Found ${result.totalFound} docs (searched in ${result.searchTime}ms):\n\n${formatted}` } ], data: result };
+  }
+
+  private async handleGetDocs(args: any) {
+    const limit = Math.max(1, Math.min(500, Number(args.limit) || 20));
+    const entries = await this.withTimeout<any>(this.provider.getRecentDocs(limit));
+
+    if (!entries || entries.length === 0) {
+      return { content: [ { type: 'text', text: 'No docs found.' } ] };
+    }
+
+  const formatted = entries.map((e: any) => `${e.title ? e.title + ' - ' : ''}${e.url || ''}\n${e.content.slice(0,300)}\n---`).join('\n');
+
+  return { content: [ { type: 'text', text: `Recent ${entries.length} docs:\n\n${formatted}` } ], data: entries };
+  }
+
+  private async handleLoadAllDocs() {
+    const entries = await this.withTimeout<any>(this.provider.getAllDocs());
+    if (!entries || entries.length === 0) {
+      return { content: [ { type: 'text', text: 'No docs stored.' } ] };
+    }
+
+  const formatted = entries.map((e: any) => `${e.title ? e.title + ' - ' : ''}${e.url || ''}\n${e.content.slice(0,300)}\n---`).join('\n');
+
+  return { content: [ { type: 'text', text: `All ${entries.length} docs:\n\n${formatted}` } ], data: entries };
+  }
+
+  private async handleDeleteDocs(args: any) {
+    const options = {
+      id: typeof args.id === 'string' ? args.id : undefined,
+      tags: Array.isArray(args.tags) ? args.tags : undefined,
+      query: typeof args.query === 'string' ? args.query : undefined,
+      before: typeof args.before === 'string' ? args.before : undefined,
+      force: !!args.force
+    };
+
+    const deleted = await this.withTimeout<number>(this.provider.deleteDocs(options));
+    return { content: [ { type: 'text', text: `Deleted ${deleted} docs.` } ] };
+  }
+
+  private async handleUpdateDocs(args: any) {
+    if (!args || typeof args !== 'object' || !args.update) throw new Error('`update` object is required');
+
+    const options = {
+      id: typeof args.id === 'string' ? args.id : undefined,
+      filters: args.filters || undefined,
+      update: args.update,
+      force: !!args.force
+    };
+
+    const updated = await this.withTimeout<number>(this.provider.updateDocs(options));
+    return { content: [ { type: 'text', text: `Updated ${updated} docs.` } ] };
   }
 
   private setupHttpFallback(): void {

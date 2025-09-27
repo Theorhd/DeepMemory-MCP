@@ -208,4 +208,11 @@ export class MySQLProvider implements BaseProvider {
   async linkMemoryToCluster(memoryId: string, clusterId: string): Promise<boolean> { throw new Error('Not implemented in MySQLProvider'); }
   async unlinkMemoryFromCluster(memoryId: string): Promise<boolean> { throw new Error('Not implemented in MySQLProvider'); }
 
+  async addDoc(doc: Omit<import('../types/index.js').DocEntry, 'id' | 'timestamp' | 'lastFetched' | 'accessCount'>, id?: string): Promise<import('../types/index.js').DocEntry> { throw new Error('Not implemented in MySQLProvider'); }
+  async searchDocs(options: import('../types/index.js').DocSearchOptions): Promise<import('../types/index.js').DocSearchResult> { throw new Error('Not implemented in MySQLProvider'); }
+  async getRecentDocs(limit?: number): Promise<import('../types/index.js').DocEntry[]> { throw new Error('Not implemented in MySQLProvider'); }
+  async getAllDocs(): Promise<import('../types/index.js').DocEntry[]> { throw new Error('Not implemented in MySQLProvider'); }
+  async deleteDocs(options: any): Promise<number> { throw new Error('Not implemented in MySQLProvider'); }
+  async updateDocs(options: any): Promise<number> { throw new Error('Not implemented in MySQLProvider'); }
+
 }

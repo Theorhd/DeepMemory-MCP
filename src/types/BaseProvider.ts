@@ -25,4 +25,11 @@ export interface BaseProvider {
   linkMemoryToCluster(memoryId: string, clusterId: string): Promise<boolean>;
   unlinkMemoryFromCluster(memoryId: string): Promise<boolean>;
   getMemoriesByCluster(clusterId: string): Promise<MemoryEntry[]>;
+
+  addDoc(doc: Omit<import('./index.js').DocEntry, 'id' | 'timestamp' | 'lastFetched' | 'accessCount'>, id?: string): Promise<import('./index.js').DocEntry>;
+  searchDocs(options: import('./index.js').DocSearchOptions): Promise<import('./index.js').DocSearchResult>;
+  getRecentDocs(limit?: number): Promise<import('./index.js').DocEntry[]>;
+  getAllDocs(): Promise<import('./index.js').DocEntry[]>;
+  deleteDocs(options: any): Promise<number>;
+  updateDocs(options: any): Promise<number>;
 }

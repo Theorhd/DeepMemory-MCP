@@ -91,6 +91,22 @@ export class SQLiteProvider implements BaseProvider {
     this.db.exec(clustersTable);
     this.db.exec(clusterDetailsTable);
 
+    const docsTable = `
+      CREATE TABLE IF NOT EXISTS docs (
+        id TEXT PRIMARY KEY,
+        url TEXT,
+        title TEXT,
+        content TEXT NOT NULL,
+        tags TEXT NOT NULL DEFAULT '[]',
+        timestamp TEXT NOT NULL,
+        lastFetched TEXT NOT NULL,
+        accessCount INTEGER NOT NULL DEFAULT 0,
+        metadata TEXT NOT NULL DEFAULT '{}'
+      )
+    `;
+
+    this.db.exec(docsTable);
+
     this.createIndexes();
     console.error('Database tables and indexes created');
   }
@@ -108,6 +124,9 @@ export class SQLiteProvider implements BaseProvider {
       'CREATE INDEX IF NOT EXISTS idx_clusters_createdAt ON details_clusters(createdAt)',
       'CREATE INDEX IF NOT EXISTS idx_cluster_details_clusterId ON cluster_details(clusterId)',
       'CREATE INDEX IF NOT EXISTS idx_cluster_details_key ON cluster_details(key)'
+      , 'CREATE INDEX IF NOT EXISTS idx_docs_timestamp ON docs(timestamp)'
+      , 'CREATE INDEX IF NOT EXISTS idx_docs_tags ON docs(tags)'
+      , 'CREATE INDEX IF NOT EXISTS idx_docs_lastFetched ON docs(lastFetched)'
     ];
 
     for (const indexSql of indexes) {
@@ -283,7 +302,7 @@ export class SQLiteProvider implements BaseProvider {
     if (options.tags && options.tags.length > 0) {
       const tagConditions = options.tags.map(() => 'tags LIKE ?').join(' OR ');
       sql += ` AND (${tagConditions})`;
-      options.tags.forEach(tag => params.push(`%"${tag}"%`));
+      options.tags.forEach((tag: string) => params.push(`%"${tag}"%`));
     }
 
     const sortBy = options.sortBy || 'createdAt';
@@ -374,6 +393,196 @@ export class SQLiteProvider implements BaseProvider {
       console.error('Error adding memory:', error);
       throw error;
     }
+  }
+
+  async addDoc(doc: Omit<import('../types/index.js').DocEntry, 'id' | 'timestamp' | 'lastFetched' | 'accessCount'>, id?: string): Promise<import('../types/index.js').DocEntry> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const entry = {
+      id: id || randomUUID(),
+      url: doc.url || null,
+      title: doc.title || null,
+      content: doc.content,
+      tags: doc.tags || [],
+      timestamp: new Date(),
+      lastFetched: new Date(),
+      accessCount: 0,
+      metadata: doc.metadata || {}
+    } as import('../types/index.js').DocEntry;
+
+    const stmt = this.db.prepare(`
+      INSERT INTO docs (id, url, title, content, tags, timestamp, lastFetched, accessCount, metadata)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    const params = [
+      entry.id,
+      entry.url,
+      entry.title,
+      entry.content,
+      JSON.stringify(entry.tags),
+      entry.timestamp.toISOString(),
+      entry.lastFetched.toISOString(),
+      entry.accessCount,
+      JSON.stringify(entry.metadata)
+    ];
+
+    try {
+      stmt.run(...params);
+      return entry;
+    } catch (error) {
+      console.error('Error adding doc:', error);
+      throw error;
+    }
+  }
+
+  async searchDocs(options: import('../types/index.js').DocSearchOptions): Promise<import('../types/index.js').DocSearchResult> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const startTime = Date.now();
+    let sql = 'SELECT * FROM docs WHERE 1=1';
+    const params: any[] = [];
+
+    if (options.query) {
+      sql += ' AND (content LIKE ? OR title LIKE ?)';
+      params.push(`%${options.query}%`, `%${options.query}%`);
+    }
+
+    if (options.tags && options.tags.length > 0) {
+      const tagConditions = options.tags.map(() => 'tags LIKE ?').join(' OR ');
+      sql += ` AND (${tagConditions})`;
+      options.tags.forEach(tag => params.push(`%"${tag}"%`));
+    }
+
+    const sortBy = options.sortBy || 'timestamp';
+    const sortOrder = options.sortOrder === 'asc' ? 'ASC' : 'DESC';
+    sql += ` ORDER BY ${sortBy} ${sortOrder}`;
+
+    if (options.limit) {
+      sql += ' LIMIT ?';
+      params.push(options.limit);
+    }
+
+    try {
+      const stmt = this.db.prepare(sql);
+      const rows = stmt.all(...params) as any[];
+
+      const entries: import('../types/index.js').DocEntry[] = rows.map(row => ({
+        id: row.id,
+        url: row.url || undefined,
+        title: row.title || undefined,
+        content: row.content,
+        tags: JSON.parse(row.tags),
+        timestamp: new Date(row.timestamp),
+        lastFetched: new Date(row.lastFetched),
+        accessCount: row.accessCount,
+        metadata: JSON.parse(row.metadata)
+      }));
+
+      const searchTime = Date.now() - startTime;
+
+      if (entries.length > 0) {
+        this.updateDocsAccessCount(entries.map(e => e.id)).catch(err => console.error('Failed to update docs access count', err));
+      }
+
+      return { entries, totalFound: entries.length, searchTime };
+    } catch (error) {
+      console.error('Error searching docs:', error);
+      throw error;
+    }
+  }
+
+  async getRecentDocs(limit: number = 20): Promise<import('../types/index.js').DocEntry[]> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const stmt = this.db.prepare('SELECT * FROM docs ORDER BY timestamp DESC LIMIT ?');
+    const rows = stmt.all(limit) as any[];
+
+    return rows.map(row => ({ id: row.id, url: row.url || undefined, title: row.title || undefined, content: row.content, tags: JSON.parse(row.tags), timestamp: new Date(row.timestamp), lastFetched: new Date(row.lastFetched), accessCount: row.accessCount, metadata: JSON.parse(row.metadata) }));
+  }
+
+  async getAllDocs(): Promise<import('../types/index.js').DocEntry[]> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const stmt = this.db.prepare('SELECT * FROM docs ORDER BY timestamp DESC');
+    const rows = stmt.all() as any[];
+
+    return rows.map(row => ({ id: row.id, url: row.url || undefined, title: row.title || undefined, content: row.content, tags: JSON.parse(row.tags), timestamp: new Date(row.timestamp), lastFetched: new Date(row.lastFetched), accessCount: row.accessCount, metadata: JSON.parse(row.metadata) }));
+  }
+
+  async deleteDocs(options: { id?: string; tags?: string[]; query?: string; before?: string; force?: boolean }): Promise<number> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const hasFilters = !!(options.id || (options.tags && options.tags.length > 0) || options.query || options.before);
+    if (!hasFilters && !options.force) {
+      throw new Error('Refusing to delete all docs without filters. Provide filters or set force=true.');
+    }
+
+    let sql = 'DELETE FROM docs WHERE 1=1';
+    const params: any[] = [];
+
+    if (options.id) {
+      sql = 'DELETE FROM docs WHERE id = ?';
+      params.push(options.id);
+    } else {
+      if (options.query) { sql += ' AND content LIKE ?'; params.push(`%${options.query}%`); }
+  if (options.tags && options.tags.length > 0) { const tagConditions = options.tags.map(() => 'tags LIKE ?').join(' OR '); sql += ` AND (${tagConditions})`; options.tags.forEach((t: string) => params.push(`%"${t}"%`)); }
+      if (options.before) { sql += ' AND timestamp < ?'; params.push(new Date(options.before).toISOString()); }
+    }
+
+    try {
+      const stmt = this.db.prepare(sql);
+      const result = stmt.run(...params);
+      return result.changes;
+    } catch (error) {
+      console.error('Error deleting docs:', error);
+      throw error;
+    }
+  }
+
+  async updateDocs(options: { id?: string; filters?: any; update: any; force?: boolean }): Promise<number> {
+    if (!this.db) throw new Error('Database not initialized');
+    const { id, filters = {}, update, force } = options;
+
+    if (!id) {
+      const hasFilters = !!(filters.query || (filters.tags && filters.tags.length > 0) || filters.before);
+      if (!hasFilters && !force) throw new Error('Refusing to update all docs without filters. Provide filters or set force=true.');
+    }
+
+    const setParts: string[] = [];
+    const params: any[] = [];
+
+    if (typeof update.content === 'string') { setParts.push('content = ?'); params.push(update.content); }
+    if (typeof update.title === 'string') { setParts.push('title = ?'); params.push(update.title); }
+    if (Array.isArray(update.tags)) { setParts.push('tags = ?'); params.push(JSON.stringify(update.tags)); }
+    if (update.metadata && typeof update.metadata === 'object') { setParts.push('metadata = ?'); params.push(JSON.stringify(update.metadata)); }
+
+    if (setParts.length === 0) throw new Error('No update fields provided');
+
+    let sql = `UPDATE docs SET ${setParts.join(', ')} WHERE 1=1`;
+
+    if (id) { sql += ' AND id = ?'; params.push(id); } else {
+      if (filters.query) { sql += ' AND content LIKE ?'; params.push(`%${filters.query}%`); }
+  if (filters.tags && filters.tags.length > 0) { const tagConditions = filters.tags.map(() => 'tags LIKE ?').join(' OR '); sql += ` AND (${tagConditions})`; filters.tags.forEach((t: string) => params.push(`%"${t}"%`)); }
+      if (filters.before) { sql += ' AND timestamp < ?'; params.push(new Date(filters.before).toISOString()); }
+    }
+
+    try {
+      const stmt = this.db.prepare(sql);
+      const result = stmt.run(...params);
+      return result.changes;
+    } catch (error) {
+      console.error('Error updating docs:', error);
+      throw error;
+    }
+  }
+
+  private async updateDocsAccessCount(ids: string[]): Promise<void> {
+    if (!this.db || ids.length === 0) return;
+    const placeholders = ids.map(() => '?').join(',');
+    const sql = `UPDATE docs SET accessCount = accessCount + 1, lastFetched = ? WHERE id IN (${placeholders})`;
+    const params = [new Date().toISOString(), ...ids];
+    try { this.db.prepare(sql).run(...params); } catch (err) { console.error('Error updating docs access count', err); }
   }
 
   async searchMemories(options: SearchOptions): Promise<SearchResult> {
