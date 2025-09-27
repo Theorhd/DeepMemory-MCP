@@ -1,10 +1,16 @@
 # DeepMemory MCP
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-![version](https://img.shields.io/badge/version-1.1.0-blue.svg)
+![version](https://img.shields.io/badge/version-1.1.1-blue.svg)
 ![node](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)
 
 ## Changelog
+
+### v1.1.1 — corrections et améliorations
+
+- Remplacement du package natif `sqlite3` par `better-sqlite3` pour une maintenance améliorée, de meilleures performances et une meilleure expérience TypeScript. Le `package.json` a été mis à jour pour utiliser `better-sqlite3`.
+- Ajout de l'interface `BaseProvider` (types partagés) : standardise le contrat que doivent implémenter les providers (SQLite, MySQL, etc.) et facilite l'ajout de nouveaux backends.
+- Ajustements mineurs : mise à jour des providers existants pour implémenter `BaseProvider` et corrections mineures liées à l'initialisation/gestion des providers.
 
 ### v1.1.0 — nouveautés principales
 
