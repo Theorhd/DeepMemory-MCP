@@ -23,7 +23,7 @@ declare global {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const version = "1.1.2";
+const version = "1.1.3";
 
 export class DeepMemoryServer {
   private server: Server;
