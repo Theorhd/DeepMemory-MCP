@@ -1,6 +1,7 @@
 import mysql from 'mysql2/promise';
 import { MemoryEntry, SearchOptions, SearchResult, MemoryEntryWithCluster, DetailsCluster, ClusterDetail, CreateClusterOptions, UpdateClusterOptions, ClusterSearchOptions, BaseProvider } from '../types/index.js';
 import { randomUUID } from 'crypto';
+import type { DocEntry, DocSearchOptions, DocSearchResult } from '../types/index.js';
 
 export class MySQLProvider implements BaseProvider {
   private pool: mysql.Pool | null = null;
@@ -8,6 +9,79 @@ export class MySQLProvider implements BaseProvider {
 
   constructor(config: mysql.PoolOptions) {
     this.config = config;
+  }
+  async searchDocs(options: import("../types/index.js").DocSearchOptions): Promise<import("../types/index.js").DocSearchResult> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const limit = typeof options.limit === 'number' ? options.limit : 20;
+    const offset = typeof (options as any).offset === 'number' ? (options as any).offset : 0;
+
+    const whereClauses: string[] = [];
+    const params: any[] = [];
+
+    if (options.query) {
+      const q = `%${options.query}%`;
+      whereClauses.push('(title LIKE ? OR content LIKE ? OR url LIKE ?)');
+      params.push(q, q, q);
+    }
+
+    if (options.tags && Array.isArray(options.tags) && options.tags.length > 0) {
+      // require every tag to be present
+      for (const t of options.tags) {
+        whereClauses.push('JSON_CONTAINS(tags, ?)');
+        params.push(JSON.stringify(t));
+      }
+    }
+
+    const whereSql = whereClauses.length > 0 ? 'WHERE ' + whereClauses.join(' AND ') : '';
+
+    // total count
+    const conn = await this.pool.getConnection();
+    try {
+      const countSql = `SELECT COUNT(*) as total FROM docs ${whereSql}`;
+      const [countRows]: any = await conn.query(countSql, params);
+      const total = (countRows as any[])[0]?.total || 0;
+
+      // ordering
+      let orderSql = 'ORDER BY timestamp DESC';
+      const sortBy: any = (options as any).sortBy;
+      const order = (options as any).order === 'asc' ? 'ASC' : 'DESC';
+      if (sortBy === 'title') orderSql = `ORDER BY title ${order}`;
+      else if (sortBy === 'lastFetched') orderSql = `ORDER BY lastFetched ${order}`;
+      else if (sortBy === 'accessCount') orderSql = `ORDER BY accessCount ${order}`;
+      else if (sortBy === 'timestamp') orderSql = `ORDER BY timestamp ${order}`;
+
+      const sql = `SELECT * FROM docs ${whereSql} ${orderSql} LIMIT ? OFFSET ?`;
+      const finalParams = params.concat([limit, offset]);
+      const [rows]: any = await conn.query(sql, finalParams);
+
+      const results: import("../types/index.js").DocEntry[] = (rows as any[]).map(r => ({
+        id: r.id,
+        url: r.url,
+        title: r.title,
+        content: r.content,
+        tags: Array.isArray(r.tags) ? r.tags : JSON.parse(r.tags || '[]'),
+        timestamp: new Date(r.timestamp),
+        lastFetched: new Date(r.lastFetched),
+        accessCount: r.accessCount,
+        metadata: r.metadata ? (typeof r.metadata === 'object' ? r.metadata : JSON.parse(r.metadata)) : {}
+      }));
+
+      return { results, total } as unknown as import("../types/index.js").DocSearchResult;
+    } finally {
+      conn.release();
+    }
+  }
+  getRecentDocs(limit?: number): Promise<import("../types/index.js").DocEntry[]> {
+    throw new Error('Method not implemented.');
+  }
+  getAllDocs(): Promise<import("../types/index.js").DocEntry[]> {
+    throw new Error('Method not implemented.');
+  }
+  deleteDocs(options: any): Promise<number> {
+    throw new Error('Method not implemented.');
+  }
+  updateDocs(options: any): Promise<number> {
+    throw new Error('Method not implemented.');
   }
 
   async initialize(): Promise<void> {
@@ -53,6 +127,21 @@ export class MySQLProvider implements BaseProvider {
           importance INT NOT NULL DEFAULT 5,
           createdAt DATETIME NOT NULL,
           updatedAt DATETIME NOT NULL
+        )
+      `);
+
+      // Docs storage table
+      await conn.query(`
+        CREATE TABLE IF NOT EXISTS docs (
+          id VARCHAR(36) PRIMARY KEY,
+          url TEXT,
+          title TEXT,
+          content LONGTEXT NOT NULL,
+          tags JSON NOT NULL,
+          timestamp DATETIME NOT NULL,
+          lastFetched DATETIME NOT NULL,
+          accessCount INT NOT NULL DEFAULT 0,
+          metadata JSON NOT NULL
         )
       `);
     } finally {
@@ -208,11 +297,39 @@ export class MySQLProvider implements BaseProvider {
   async linkMemoryToCluster(memoryId: string, clusterId: string): Promise<boolean> { throw new Error('Not implemented in MySQLProvider'); }
   async unlinkMemoryFromCluster(memoryId: string): Promise<boolean> { throw new Error('Not implemented in MySQLProvider'); }
 
-  async addDoc(doc: Omit<import('../types/index.js').DocEntry, 'id' | 'timestamp' | 'lastFetched' | 'accessCount'>, id?: string): Promise<import('../types/index.js').DocEntry> { throw new Error('Not implemented in MySQLProvider'); }
-  async searchDocs(options: import('../types/index.js').DocSearchOptions): Promise<import('../types/index.js').DocSearchResult> { throw new Error('Not implemented in MySQLProvider'); }
-  async getRecentDocs(limit?: number): Promise<import('../types/index.js').DocEntry[]> { throw new Error('Not implemented in MySQLProvider'); }
-  async getAllDocs(): Promise<import('../types/index.js').DocEntry[]> { throw new Error('Not implemented in MySQLProvider'); }
-  async deleteDocs(options: any): Promise<number> { throw new Error('Not implemented in MySQLProvider'); }
-  async updateDocs(options: any): Promise<number> { throw new Error('Not implemented in MySQLProvider'); }
-
+  // Docs APIs
+  async addDoc(doc: Omit<DocEntry, 'id' | 'timestamp' | 'lastFetched' | 'accessCount'>, id?: string): Promise<DocEntry> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const entry: DocEntry = {
+      id: id || randomUUID(),
+      url: doc.url,
+      title: doc.title,
+      content: doc.content,
+      tags: doc.tags || [],
+      timestamp: new Date(),
+      lastFetched: new Date(),
+      accessCount: 0,
+      metadata: doc.metadata || {}
+    };
+    const conn = await this.pool.getConnection();
+    try {
+      await conn.query(
+        'INSERT INTO docs (id, url, title, content, tags, timestamp, lastFetched, accessCount, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [
+          entry.id,
+          entry.url,
+          entry.title,
+          entry.content,
+          JSON.stringify(entry.tags),
+          entry.timestamp.toISOString().slice(0,19).replace('T',' '),
+          entry.lastFetched.toISOString().slice(0,19).replace('T',' '),
+          entry.accessCount,
+          JSON.stringify(entry.metadata)
+        ]
+      );
+      return entry;
+    } finally {
+      conn.release();
+    }
+  }
 }

@@ -51,6 +51,28 @@ export class DeepMemoryServer {
       });
     });
   }
+  
+  // Helper to format doc entries for text output
+  private formatDocEntries(entries: Array<{ title?: string; url?: string; content: string }>, sliceLen: number = 300): string {
+    return entries.map(e => {
+      const header = e.title ? `${e.title} - ` : '';
+      const link = e.url ? `${e.url}` : '';
+      const body = e.content.slice(0, sliceLen);
+      return `${header}${link}\n${body}\n---`;
+    }).join('\n');
+  }
+  
+  // Helper to format memories entries for text output
+  private formatMemoryEntries(entries: Array<{ content: string; tags: string[]; context: string; importance: number; timestamp: Date }>, sliceLen: number = 200): string {
+    return entries.map(e => {
+      const tagsStr = e.tags.length ? ` [${e.tags.join(', ')}]` : '';
+      const contextStr = e.context ? ` (${e.context})` : '';
+      const importanceStr = `★${e.importance}`;
+      const dateStr = e.timestamp.toLocaleDateString();
+      const body = e.content.slice(0, sliceLen);
+      return `${importanceStr}${contextStr}${tagsStr} - ${dateStr}\n${body}\n---`;
+    }).join('\n');
+  }
 
   private async handleCreateCluster(args: any) {
     if (!args || typeof args !== 'object') throw new Error('Invalid arguments');
@@ -891,13 +913,7 @@ export class DeepMemoryServer {
       };
     }
 
-    const formattedEntries = result.entries.map(entry => {
-      const tagsStr = entry.tags.length > 0 ? ` [${entry.tags.join(', ')}]` : '';
-      const contextStr = entry.context ? ` (${entry.context})` : '';
-      const importanceStr = `★${entry.importance}`;
-      
-      return `${importanceStr}${contextStr}${tagsStr}\n${entry.content}\n---`;
-    }).join('\n');
+    const formattedEntries = this.formatMemoryEntries(result.entries, 500);
 
     return {
       content: [
@@ -927,14 +943,7 @@ export class DeepMemoryServer {
       };
     }
 
-    const formattedEntries = entries.map(entry => {
-      const tagsStr = entry.tags.length > 0 ? ` [${entry.tags.join(', ')}]` : '';
-      const contextStr = entry.context ? ` (${entry.context})` : '';
-      const importanceStr = `★${entry.importance}`;
-      const dateStr = entry.timestamp.toLocaleDateString();
-      
-      return `${importanceStr}${contextStr}${tagsStr} - ${dateStr}\n${entry.content}\n---`;
-    }).join('\n');
+    const formattedEntries = this.formatMemoryEntries(entries);
 
     return {
       content: [
@@ -1059,14 +1068,7 @@ export class DeepMemoryServer {
       };
     }
 
-    const formattedEntries = entries.map(entry => {
-      const tagsStr = entry.tags.length > 0 ? ` [${entry.tags.join(', ')}]` : '';
-      const contextStr = entry.context ? ` (${entry.context})` : '';
-      const importanceStr = `★${entry.importance}`;
-      const dateStr = entry.timestamp.toLocaleDateString();
-      
-      return `${importanceStr}${contextStr}${tagsStr} - ${dateStr}\n${entry.content}\n---`;
-    }).join('\n');
+    const formattedEntries = this.formatMemoryEntries(entries);
 
     return {
       content: [

@@ -1,10 +1,18 @@
 # DeepMemory MCP
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-![version](https://img.shields.io/badge/version-1.1.2-blue.svg)
+![version](https://img.shields.io/badge/version-1.1.3-blue.svg)
 ![node](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)
 
 ## Changelog
+
+### v1.1.3 — optimisations et refactorisations
+
+- Factorisation de `formatMemoryEntries` et `formatDocEntries` pour réduire la duplication de code dans les handlers.
+- Refactorisation des handlers MCP pour plus de clarté et meilleure séparation des responsabilités.
+- Implémentation complète des méthodes docs dans `MySQLProvider` (CRUD, recherche, mise à jour des compteurs d'accès).
+- Optimisation de la gestion des connexions MySQL (libération systématique en `finally`).
+- Amélioration de la maintenabilité du code et préparation pour ajout ultérieur de parsing HTML plus robuste.
 
 ### v1.1.2 — ajout du stockage et des outils "docs" de développement
 
@@ -73,6 +81,7 @@ It stores memories locally in an SQLite database by default and exposes a set of
 
 - Default storage: SQLite database at `~/.deepmemory/deepmemory.db`
 - Optional MySQL provider: start with `--mysql` and provide `--mysql_host --mysql_id` (password optional)
+- Dedicated docs storage: table `docs` for development documents, accessible via MCP tools
 - Queue: `~/.deepmemory/queue.jsonl` (append-only JSONL for queued add_memory requests)
 - HTTP fallback: `http://127.0.0.1:6789` (configurable via `DEEP_MEMORY_HTTP_PORT`)
 
@@ -80,7 +89,8 @@ It stores memories locally in an SQLite database by default and exposes a set of
 
 - MCP tools to add/search/list/update/delete memories
 - Clusters to group structured details and link memories to a subject
-- Optional MySQL backend via `MySQLProvider`
+- MCP tools to add/search/list/update/delete development docs (`add_doc`, `search_docs`, `get_docs`, `load_all_docs`, `delete_docs`, `update_docs`)
+- Optional MySQL backend via `MySQLProvider` (covers memories and docs)
 - Persistent write queue while the DB initializes
 - Lightweight HTTP fallback for health-checks and simple interactions
 - Cross-platform (Windows / macOS / Linux)
