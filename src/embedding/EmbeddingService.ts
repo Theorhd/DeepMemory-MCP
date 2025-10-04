@@ -7,7 +7,7 @@ env.useBrowserCache = false;
 export class EmbeddingService {
   private static instance: EmbeddingService | null = null;
   private embedder: any = null;
-  private modelName = 'Qwen/Qwen3-Embedding-0.6B';
+  private modelName = 'mixedbread-ai/mxbai-embed-large-v1';
   private isInitializing = false;
   private initPromise: Promise<void> | null = null;
 
@@ -28,8 +28,18 @@ export class EmbeddingService {
     this.initPromise = (async () => {
       try {
         console.error(`Loading embedding model: ${this.modelName}...`);
-        this.embedder = await pipeline('feature-extraction', this.modelName);
-        console.error('Embedding model loaded successfully');
+          try {
+            this.embedder = await pipeline('feature-extraction', this.modelName);
+            console.error('Embedding model loaded successfully:', this.modelName);
+          } catch (err) {
+            console.error(`Failed to load model ${this.modelName}:`, err);
+            // Fallback to a known supported model
+            const fallbackModel = 'Xenova/all-MiniLM-L6-v2';
+            console.error(`Falling back to supported embedding model: ${fallbackModel}`);
+            this.modelName = fallbackModel;
+            this.embedder = await pipeline('feature-extraction', this.modelName);
+            console.error('Fallback embedding model loaded successfully:', this.modelName);
+          }
       } catch (error) {
         console.error('Failed to load embedding model:', error);
         throw error;
