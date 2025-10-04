@@ -1,12 +1,20 @@
 # DeepMemory MCP
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-![version](https://img.shields.io/badge/version-1.1.3-blue.svg)
+![version](https://img.shields.io/badge/version-1.2.0-blue.svg)
 ![node](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)
 
 ## Changelog
 
+### v1.2.0 — recherche sémantique et migrations
+
+- Ajout de la recherche sémantique sur mémoires et docs via outils MCP `semantic_search_memory` et `semantic_search_docs`, génération d'embeddings avec un modèle local (Qwen3 ou fallback MiniLM).
+- Migration automatique du schéma SQLite & MySQL : ajout de la colonne `embedding` et backfill des embeddings existants.
+- Gestion améliorée du fallback HTTP : ports occupés ne provoquent plus de crash.
+- Fallback automatique vers un modèle d'embedding pris en charge si le modèle principal échoue à se charger.
+
 ### v1.1.3 — optimisations et refactorisations
+
 
 - Factorisation de `formatMemoryEntries` et `formatDocEntries` pour réduire la duplication de code dans les handlers.
 - Refactorisation des handlers MCP pour plus de clarté et meilleure séparation des responsabilités.
@@ -90,6 +98,11 @@ It stores memories locally in an SQLite database by default and exposes a set of
 - MCP tools to add/search/list/update/delete memories
 - Clusters to group structured details and link memories to a subject
 - MCP tools to add/search/list/update/delete development docs (`add_doc`, `search_docs`, `get_docs`, `load_all_docs`, `delete_docs`, `update_docs`)
+  
+- Semantic search capabilities: MCP tools `semantic_search_memory` and `semantic_search_docs` for AI-driven similarity search on memories and docs.
+- Embedding management: automatic generation, storage, and persistence of embeddings for all entries.
+- Schema migration: automatic addition of `embedding` columns and backfill of embeddings in existing SQLite/MySQL databases.
+- Robust HTTP fallback: handles port conflicts gracefully without crashing the server.
 - Optional MySQL backend via `MySQLProvider` (covers memories and docs)
 - Persistent write queue while the DB initializes
 - Lightweight HTTP fallback for health-checks and simple interactions
