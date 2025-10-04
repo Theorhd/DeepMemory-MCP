@@ -1,4 +1,5 @@
 import mysql from 'mysql2/promise';
+import { EmbeddingService } from '../embedding/EmbeddingService.js';
 import { MemoryEntry, SearchOptions, SearchResult, MemoryEntryWithCluster, DetailsCluster, ClusterDetail, CreateClusterOptions, UpdateClusterOptions, ClusterSearchOptions, BaseProvider } from '../types/index.js';
 import { randomUUID } from 'crypto';
 import type { DocEntry, DocSearchOptions, DocSearchResult } from '../types/index.js';
@@ -115,7 +116,7 @@ export class MySQLProvider implements BaseProvider {
       `);
 
       await conn.query(`
-        CREATE TABLE IF NOT EXISTS cluster_details (
+    CREATE TABLE IF NOT EXISTS cluster_details (
           id VARCHAR(36) PRIMARY KEY,
           clusterId VARCHAR(36) NOT NULL,
           ` + "`key` VARCHAR(255) NOT NULL," + `
@@ -125,7 +126,7 @@ export class MySQLProvider implements BaseProvider {
           createdAt DATETIME NOT NULL,
           updatedAt DATETIME NOT NULL
         )
-      `);
+  `);
 
       await conn.query(`
         CREATE TABLE IF NOT EXISTS docs (
@@ -137,9 +138,12 @@ export class MySQLProvider implements BaseProvider {
           timestamp DATETIME NOT NULL,
           lastFetched DATETIME NOT NULL,
           accessCount INT NOT NULL DEFAULT 0,
-          metadata JSON NOT NULL
+          metadata JSON NOT NULL,
+          embedding JSON DEFAULT NULL
         )
       `);
+        // Migrate schema: add missing embedding columns and backfill
+        await this.migrateSchema();
     } finally {
       conn.release();
     }
@@ -153,6 +157,57 @@ export class MySQLProvider implements BaseProvider {
 
   getStorageInfo(): string {
     return `MySQL pool: ${this.pool ? 'connected' : 'not connected'}`;
+  }
+
+  // Migrate schema: add embedding columns and backfill existing data
+  private async migrateSchema(): Promise<void> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const conn = await this.pool.getConnection();
+    try {
+      // Check and add embedding column for memories
+      let [rows]: any = await conn.query("SHOW COLUMNS FROM memories LIKE 'embedding'");
+      if ((rows as any[]).length === 0) {
+        await conn.query('ALTER TABLE memories ADD COLUMN embedding JSON DEFAULT NULL');
+        console.error('Added embedding column to memories table');
+      }
+      // Check and add embedding column for docs
+      [rows] = await conn.query("SHOW COLUMNS FROM docs LIKE 'embedding'");
+      if ((rows as any[]).length === 0) {
+        await conn.query('ALTER TABLE docs ADD COLUMN embedding JSON DEFAULT NULL');
+        console.error('Added embedding column to docs table');
+      }
+      // Initialize embedding service
+      const embedSvc = EmbeddingService.getInstance();
+      try {
+        await embedSvc.initialize();
+      } catch (err) {
+        console.error('Embedding service unavailable for migration:', err);
+        return;
+      }
+      // Backfill memories embeddings
+      const [memRows]: any = await conn.query("SELECT id, content FROM memories WHERE embedding IS NULL");
+      for (const row of memRows as any[]) {
+        try {
+          const vec = await embedSvc.generateEmbedding(row.content);
+          await conn.query('UPDATE memories SET embedding = ? WHERE id = ?', [JSON.stringify(vec), row.id]);
+        } catch (err) {
+          console.error(`Failed to backfill memory ${row.id}:`, err);
+        }
+      }
+      // Backfill docs embeddings
+      const [docRows]: any = await conn.query("SELECT id, content FROM docs WHERE embedding IS NULL");
+      for (const row of docRows as any[]) {
+        try {
+          const vec = await embedSvc.generateEmbedding(row.content);
+          await conn.query('UPDATE docs SET embedding = ? WHERE id = ?', [JSON.stringify(vec), row.id]);
+        } catch (err) {
+          console.error(`Failed to backfill doc ${row.id}:`, err);
+        }
+      }
+      console.error('MySQL schema migration and embedding backfill completed');
+    } finally {
+      conn.release();
+    }
   }
 
   async createCluster(options: CreateClusterOptions): Promise<DetailsCluster> {

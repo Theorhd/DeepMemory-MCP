@@ -1452,14 +1452,28 @@ export class DeepMemoryServer {
       });
     });
 
-    this.httpServer.listen(this.httpPort, '127.0.0.1', () => {
-      console.error(`HTTP fallback listening on http://127.0.0.1:${this.httpPort}`);
-    });
-
-    this.httpServer.on('error', (error) => {
-      console.error('HTTP server error (non-critical):', error);
+    // Handle server errors before starting
+    this.httpServer.on('error', (error: any) => {
+      if (error && error.code === 'EADDRINUSE') {
+        console.error(`HTTP fallback port ${this.httpPort} already in use, skipping HTTP fallback`);
+      } else {
+        console.error('HTTP server error (non-critical):', error);
+      }
       this.httpServer = null;
     });
+    // Attempt to listen, catch synchronous errors
+    try {
+      this.httpServer.listen(this.httpPort, '127.0.0.1', () => {
+        console.error(`HTTP fallback listening on http://127.0.0.1:${this.httpPort}`);
+      });
+    } catch (error: any) {
+      if (error && error.code === 'EADDRINUSE') {
+        console.error(`HTTP fallback port ${this.httpPort} already in use, skipping HTTP fallback`);
+      } else {
+        console.error('Failed to start HTTP fallback:', error);
+      }
+      this.httpServer = null;
+    }
   }
 
   async run(): Promise<void> {

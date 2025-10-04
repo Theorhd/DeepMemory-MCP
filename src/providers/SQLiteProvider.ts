@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import { EmbeddingService } from '../embedding/EmbeddingService.js';
 import { MemoryEntry, SearchOptions, SearchResult, MemoryEntryWithCluster, DetailsCluster, ClusterDetail, CreateClusterOptions, UpdateClusterOptions, ClusterSearchOptions, BaseProvider } from '../types/index.js';
 import { randomUUID } from 'crypto';
 
@@ -22,22 +23,24 @@ export class SQLiteProvider implements BaseProvider {
     }
 
     this.isInitializing = true;
-    this.initPromise = new Promise((resolve, reject) => {
+    this.initPromise = (async () => {
       try {
         this.db = new Database(this.dbPath);
         console.error(`SQLite database connected: ${this.dbPath}`);
-        
+
         this.db.pragma('foreign_keys = ON');
-        
+
         this.createTables();
-        this.isInitializing = false;
-        resolve();
+        this.createIndexes();
+        // Migrate schema and generate missing embeddings
+        await this.migrateSchema();
       } catch (err) {
-        console.error('Error opening database:', err);
+        console.error('Error initializing database:', err);
+        throw err;
+      } finally {
         this.isInitializing = false;
-        reject(err);
       }
-    });
+    })();
 
     return this.initPromise;
   }
@@ -144,6 +147,52 @@ export class SQLiteProvider implements BaseProvider {
         }
       }
     }
+  }
+
+  /**
+   * Migrate database schema: add embedding columns and backfill embeddings for existing rows
+   */
+  private async migrateSchema(): Promise<void> {
+    if (!this.db) throw new Error('Database not initialized');
+    console.error('Checking database schema for migrations...');
+    // Add embedding column to memories if missing
+    const memInfo = this.db.prepare('PRAGMA table_info(memories)').all();
+    if (!memInfo.some((col: any) => col.name === 'embedding')) {
+      this.db.prepare('ALTER TABLE memories ADD COLUMN embedding TEXT').run();
+      console.error('Added embedding column to memories table');
+    }
+    // Add embedding column to docs if missing
+    const docInfo = this.db.prepare('PRAGMA table_info(docs)').all();
+    if (!docInfo.some((col: any) => col.name === 'embedding')) {
+      this.db.prepare('ALTER TABLE docs ADD COLUMN embedding TEXT').run();
+      console.error('Added embedding column to docs table');
+    }
+    // Backfill embeddings
+    const embedSvc = EmbeddingService.getInstance();
+    if (!embedSvc.isReady()) {
+      try { await embedSvc.initialize(); } catch (err) { console.error('Embedding service init failed for migration:', err); return; }
+    }
+    // Memories backfill
+    const memRows: Array<{id:string,content:string}> = this.db.prepare(
+      "SELECT id, content FROM memories WHERE embedding IS NULL OR embedding = ''"
+    ).all();
+    for (const row of memRows) {
+      try {
+        const vec = await embedSvc.generateEmbedding(row.content);
+        this.db.prepare('UPDATE memories SET embedding = ? WHERE id = ?').run(JSON.stringify(vec), row.id);
+      } catch (err) { console.error(`Failed to backfill memory ${row.id}:`, err); }
+    }
+    // Docs backfill
+    const docRows: Array<{id:string,content:string}> = this.db.prepare(
+      "SELECT id, content FROM docs WHERE embedding IS NULL OR embedding = ''"
+    ).all();
+    for (const row of docRows) {
+      try {
+        const vec = await embedSvc.generateEmbedding(row.content);
+        this.db.prepare('UPDATE docs SET embedding = ? WHERE id = ?').run(JSON.stringify(vec), row.id);
+      } catch (err) { console.error(`Failed to backfill doc ${row.id}:`, err); }
+    }
+    console.error('Database schema migration and embedding backfill completed');
   }
 
   async createCluster(options: CreateClusterOptions): Promise<DetailsCluster> {
