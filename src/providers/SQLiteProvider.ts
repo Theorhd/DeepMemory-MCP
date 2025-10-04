@@ -57,6 +57,7 @@ export class SQLiteProvider implements BaseProvider {
         accessCount INTEGER NOT NULL DEFAULT 0,
         metadata TEXT NOT NULL DEFAULT '{}',
         clusterId TEXT,
+        embedding TEXT,
         FOREIGN KEY (clusterId) REFERENCES details_clusters(id)
       )
     `;
@@ -101,7 +102,8 @@ export class SQLiteProvider implements BaseProvider {
         timestamp TEXT NOT NULL,
         lastFetched TEXT NOT NULL,
         accessCount INTEGER NOT NULL DEFAULT 0,
-        metadata TEXT NOT NULL DEFAULT '{}'
+        metadata TEXT NOT NULL DEFAULT '{}',
+        embedding TEXT
       )
     `;
 
@@ -365,12 +367,13 @@ export class SQLiteProvider implements BaseProvider {
       lastAccessed: new Date(),
       accessCount: 0,
       metadata: memory.metadata || {},
-      clusterId: memory.clusterId
+      clusterId: memory.clusterId,
+      embedding: memory.embedding
     };
 
     const stmt = this.db.prepare(`
-      INSERT INTO memories (id, content, tags, context, importance, timestamp, lastAccessed, accessCount, metadata, clusterId)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO memories (id, content, tags, context, importance, timestamp, lastAccessed, accessCount, metadata, clusterId, embedding)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const params = [
@@ -383,7 +386,8 @@ export class SQLiteProvider implements BaseProvider {
       entry.lastAccessed.toISOString(),
       entry.accessCount,
       JSON.stringify(entry.metadata),
-      entry.clusterId || null
+      entry.clusterId || null,
+      entry.embedding ? JSON.stringify(entry.embedding) : null
     ];
 
     try {
@@ -407,12 +411,13 @@ export class SQLiteProvider implements BaseProvider {
       timestamp: new Date(),
       lastFetched: new Date(),
       accessCount: 0,
-      metadata: doc.metadata || {}
+      metadata: doc.metadata || {},
+      embedding: doc.embedding
     } as import('../types/index.js').DocEntry;
 
     const stmt = this.db.prepare(`
-      INSERT INTO docs (id, url, title, content, tags, timestamp, lastFetched, accessCount, metadata)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO docs (id, url, title, content, tags, timestamp, lastFetched, accessCount, metadata, embedding)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const params = [
@@ -424,7 +429,8 @@ export class SQLiteProvider implements BaseProvider {
       entry.timestamp.toISOString(),
       entry.lastFetched.toISOString(),
       entry.accessCount,
-      JSON.stringify(entry.metadata)
+      JSON.stringify(entry.metadata),
+      entry.embedding ? JSON.stringify(entry.embedding) : null
     ];
 
     try {
@@ -1127,5 +1133,159 @@ export class SQLiteProvider implements BaseProvider {
     } catch (err) {
       return 'Unknown storage info';
     }
+  }
+
+  // Semantic search methods
+  async semanticSearchMemories(queryEmbedding: number[], options: import('../types/index.js').SemanticSearchOptions): Promise<import('../types/index.js').SemanticSearchResult> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const startTime = Date.now();
+    let sql = 'SELECT * FROM memories WHERE embedding IS NOT NULL';
+    const params: any[] = [];
+
+    if (options.tags && options.tags.length > 0) {
+      const tagConditions = options.tags.map(() => 'tags LIKE ?').join(' OR ');
+      sql += ` AND (${tagConditions})`;
+      options.tags.forEach((tag: string) => params.push(`%"${tag}"%`));
+    }
+
+    if (options.contextFilter) {
+      sql += ' AND context LIKE ?';
+      params.push(`%${options.contextFilter}%`);
+    }
+
+    try {
+      const stmt = this.db.prepare(sql);
+      const rows = stmt.all(...params) as any[];
+
+      // Calculate similarities
+      const entriesWithSimilarity = rows.map(row => {
+        const embedding = row.embedding ? JSON.parse(row.embedding) : null;
+        const similarity = embedding ? this.cosineSimilarity(queryEmbedding, embedding) : 0;
+
+        return {
+          id: row.id,
+          content: row.content,
+          tags: JSON.parse(row.tags),
+          context: row.context,
+          importance: row.importance,
+          timestamp: new Date(row.timestamp),
+          lastAccessed: new Date(row.lastAccessed),
+          accessCount: row.accessCount,
+          metadata: JSON.parse(row.metadata),
+          clusterId: row.clusterId,
+          embedding,
+          similarity
+        };
+      });
+
+      // Filter by threshold and sort by similarity
+      const threshold = options.similarityThreshold || 0.5;
+      const filtered = entriesWithSimilarity.filter(e => e.similarity >= threshold);
+      filtered.sort((a, b) => b.similarity - a.similarity);
+
+      const limit = options.limit || 20;
+      const results = filtered.slice(0, limit);
+
+      const searchTime = Date.now() - startTime;
+
+      if (results.length > 0) {
+        await this.updateAccessCount(results.map(e => e.id));
+      }
+
+      return {
+        entries: results,
+        totalFound: results.length,
+        searchTime
+      };
+    } catch (error) {
+      console.error('Error in semantic search:', error);
+      throw error;
+    }
+  }
+
+  async semanticSearchDocs(queryEmbedding: number[], options: import('../types/index.js').SemanticSearchOptions): Promise<import('../types/index.js').DocSemanticSearchResult> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const startTime = Date.now();
+    let sql = 'SELECT * FROM docs WHERE embedding IS NOT NULL';
+    const params: any[] = [];
+
+    if (options.tags && options.tags.length > 0) {
+      const tagConditions = options.tags.map(() => 'tags LIKE ?').join(' OR ');
+      sql += ` AND (${tagConditions})`;
+      options.tags.forEach((tag: string) => params.push(`%"${tag}"%`));
+    }
+
+    try {
+      const stmt = this.db.prepare(sql);
+      const rows = stmt.all(...params) as any[];
+
+      const entriesWithSimilarity = rows.map(row => {
+        const embedding = row.embedding ? JSON.parse(row.embedding) : null;
+        const similarity = embedding ? this.cosineSimilarity(queryEmbedding, embedding) : 0;
+
+        return {
+          id: row.id,
+          url: row.url || undefined,
+          title: row.title || undefined,
+          content: row.content,
+          tags: JSON.parse(row.tags),
+          timestamp: new Date(row.timestamp),
+          lastFetched: new Date(row.lastFetched),
+          accessCount: row.accessCount,
+          metadata: JSON.parse(row.metadata),
+          embedding,
+          similarity
+        };
+      });
+
+      const threshold = options.similarityThreshold || 0.5;
+      const filtered = entriesWithSimilarity.filter(e => e.similarity >= threshold);
+      filtered.sort((a, b) => b.similarity - a.similarity);
+
+      const limit = options.limit || 20;
+      const results = filtered.slice(0, limit);
+
+      const searchTime = Date.now() - startTime;
+
+      if (results.length > 0) {
+        this.updateDocsAccessCount(results.map(e => e.id)).catch(err => console.error('Failed to update docs access count', err));
+      }
+
+      return {
+        entries: results,
+        totalFound: results.length,
+        searchTime
+      };
+    } catch (error) {
+      console.error('Error in semantic docs search:', error);
+      throw error;
+    }
+  }
+
+  private cosineSimilarity(vecA: number[], vecB: number[]): number {
+    if (vecA.length !== vecB.length) {
+      return 0;
+    }
+
+    let dotProduct = 0;
+    let normA = 0;
+    let normB = 0;
+
+    for (let i = 0; i < vecA.length; i++) {
+      dotProduct += vecA[i] * vecB[i];
+      normA += vecA[i] * vecA[i];
+      normB += vecB[i] * vecB[i];
+    }
+
+    normA = Math.sqrt(normA);
+    normB = Math.sqrt(normB);
+
+    if (normA === 0 || normB === 0) {
+      return 0;
+    }
+
+    return dotProduct / (normA * normB);
   }
 }

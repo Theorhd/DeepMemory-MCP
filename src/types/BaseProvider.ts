@@ -32,4 +32,8 @@ export interface BaseProvider {
   getAllDocs(): Promise<import('./index.js').DocEntry[]>;
   deleteDocs(options: any): Promise<number>;
   updateDocs(options: any): Promise<number>;
+
+  // Semantic search methods
+  semanticSearchMemories(queryEmbedding: number[], options: import('./index.js').SemanticSearchOptions): Promise<import('./index.js').SemanticSearchResult>;
+  semanticSearchDocs(queryEmbedding: number[], options: import('./index.js').SemanticSearchOptions): Promise<import('./index.js').DocSemanticSearchResult>;
 }

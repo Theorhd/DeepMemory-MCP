@@ -309,12 +309,13 @@ export class MySQLProvider implements BaseProvider {
       timestamp: new Date(),
       lastFetched: new Date(),
       accessCount: 0,
-      metadata: doc.metadata || {}
+      metadata: doc.metadata || {},
+      embedding: doc.embedding
     };
     const conn = await this.pool.getConnection();
     try {
       await conn.query(
-        'INSERT INTO docs (id, url, title, content, tags, timestamp, lastFetched, accessCount, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        'INSERT INTO docs (id, url, title, content, tags, timestamp, lastFetched, accessCount, metadata, embedding) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         [
           entry.id,
           entry.url,
@@ -324,12 +325,22 @@ export class MySQLProvider implements BaseProvider {
           entry.timestamp.toISOString().slice(0,19).replace('T',' '),
           entry.lastFetched.toISOString().slice(0,19).replace('T',' '),
           entry.accessCount,
-          JSON.stringify(entry.metadata)
+          JSON.stringify(entry.metadata),
+          entry.embedding ? JSON.stringify(entry.embedding) : null
         ]
       );
       return entry;
     } finally {
       conn.release();
     }
+  }
+
+  // Semantic Search (not implemented for MySQL)
+  async semanticSearchMemories(queryEmbedding: number[], options: import('../types/index.js').SemanticSearchOptions): Promise<import('../types/index.js').SemanticSearchResult> {
+    throw new Error('Semantic search is not implemented for MySQLProvider. Please use SQLiteProvider for this feature.');
+  }
+
+  async semanticSearchDocs(queryEmbedding: number[], options: import('../types/index.js').SemanticSearchOptions): Promise<import('../types/index.js').DocSemanticSearchResult> {
+    throw new Error('Semantic search is not implemented for MySQLProvider. Please use SQLiteProvider for this feature.');
   }
 }

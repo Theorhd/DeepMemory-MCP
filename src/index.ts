@@ -9,6 +9,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { SQLiteProvider } from './providers/SQLiteProvider.js';
 import { MySQLProvider } from './providers/MySQLProvider.js';
+import { EmbeddingService } from './embedding/EmbeddingService.js';
 import { fetchAndExtract } from './docs_search.js';
 import { SearchOptions, MemoryEntry, CreateClusterOptions, UpdateClusterOptions, ClusterSearchOptions, DetailsCluster, ClusterDetail, SearchResult } from './types/index.js';
 import * as path from 'path';
@@ -23,12 +24,14 @@ declare global {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const version = "1.1.3";
+const version = "1.2.0";
 
 export class DeepMemoryServer {
   private server: Server;
   private provider: any;
   private providerReady: boolean = false;
+  private embeddingService: EmbeddingService;
+  private embeddingReady: boolean = false;
   private requestTimeoutMs: number = 10000;
   private queuePath: string;
   private httpPort: number;
@@ -209,8 +212,23 @@ export class DeepMemoryServer {
     this.queuePath = path.join(deepMemoryDir, 'queue.jsonl');
     this.httpPort = Number(process.env.DEEP_MEMORY_HTTP_PORT) || 6789;
 
+    // Initialize embedding service
+    this.embeddingService = EmbeddingService.getInstance();
+    this.initializeEmbedding();
+
     this.setupTools();
     this.setupHandlers();
+  }
+
+  private async initializeEmbedding(): Promise<void> {
+    try {
+      await this.embeddingService.initialize();
+      this.embeddingReady = true;
+      console.error('Embedding service initialized successfully');
+    } catch (error) {
+      console.error('Failed to initialize embedding service:', error);
+      this.embeddingReady = false;
+    }
   }
 
   private setupTools(): void {
@@ -408,6 +426,68 @@ export class DeepMemoryServer {
             force: { type: 'boolean' }
           },
           required: ['update']
+        }
+      },
+      {
+        name: "semantic_search_memory",
+        description: "Perform semantic search on memories using AI embeddings. Requires embedding service to be initialized. Returns memories ranked by semantic similarity to the query.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            query: {
+              type: "string",
+              description: "Natural language search query"
+            },
+            limit: {
+              type: "number",
+              description: "Maximum number of results to return",
+              default: 10
+            },
+            similarityThreshold: {
+              type: "number",
+              description: "Minimum similarity score (0-1). Higher values return only very similar results.",
+              default: 0.5
+            },
+            tags: {
+              type: "array",
+              items: { type: "string" },
+              description: "Optional: Filter results by tags"
+            },
+            contextFilter: {
+              type: "string",
+              description: "Optional: Filter results by context"
+            }
+          },
+          required: ["query"]
+        }
+      },
+      {
+        name: "semantic_search_docs",
+        description: "Perform semantic search on documentation using AI embeddings. Requires embedding service to be initialized. Returns docs ranked by semantic similarity to the query.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            query: {
+              type: "string",
+              description: "Natural language search query"
+            },
+            limit: {
+              type: "number",
+              description: "Maximum number of results to return",
+              default: 10
+            },
+            similarityThreshold: {
+              type: "number",
+              description: "Minimum similarity score (0-1). Higher values return only very similar results.",
+              default: 0.5
+            },
+            tags: {
+              type: "array",
+              items: { type: "string" },
+              description: "Optional: Filter results by tags"
+            }
+          },
+          required: ["query"]
         }
       },
       {
@@ -802,6 +882,10 @@ export class DeepMemoryServer {
             return await this.handleDeleteDocs(args);
           case 'update_docs':
             return await this.handleUpdateDocs(args);
+          case 'semantic_search_memory':
+            return await this.handleSemanticSearchMemory(args);
+          case 'semantic_search_docs':
+            return await this.handleSemanticSearchDocs(args);
 
           default:
             throw new Error(`Unknown tool: ${name}`);
@@ -842,13 +926,25 @@ export class DeepMemoryServer {
       throw new Error('Importance must be a number between 1 and 10');
     }
 
+    // Generate embedding if service is ready
+    let embedding: number[] | undefined;
+    if (this.embeddingReady) {
+      try {
+        embedding = await this.embeddingService.generateEmbedding(content.trim());
+      } catch (error) {
+        console.error('Failed to generate embedding:', error);
+        // Continue without embedding if it fails
+      }
+    }
+
     const entry = await this.withTimeout<MemoryEntry>(
       this.provider.addMemory({
         content: content.trim(),
         tags: tags.filter(tag => typeof tag === 'string' && tag.trim().length > 0),
         context: String(context).trim(),
         importance: validImportance,
-        metadata: metadata || {}
+        metadata: metadata || {},
+        embedding
       })
     );
 
@@ -1147,7 +1243,25 @@ export class DeepMemoryServer {
       throw new Error('Either content or a valid URL that returns content is required');
     }
 
-    const entry = await this.withTimeout<any>(this.provider.addDoc({ url, title: finalTitle, content: finalContent, tags, metadata }));
+    // Generate embedding if service is ready
+    let embedding: number[] | undefined;
+    if (this.embeddingReady) {
+      try {
+        embedding = await this.embeddingService.generateEmbedding(finalContent.trim());
+      } catch (error) {
+        console.error('Failed to generate embedding:', error);
+        // Continue without embedding if it fails
+      }
+    }
+
+    const entry = await this.withTimeout<any>(this.provider.addDoc({ 
+      url, 
+      title: finalTitle, 
+      content: finalContent, 
+      tags, 
+      metadata,
+      embedding 
+    }));
 
     return { content: [ { type: 'text', text: `Doc stored with ID: ${entry.id}` } ], data: entry };
   }
@@ -1221,6 +1335,85 @@ export class DeepMemoryServer {
 
     const updated = await this.withTimeout<number>(this.provider.updateDocs(options));
     return { content: [ { type: 'text', text: `Updated ${updated} docs.` } ] };
+  }
+
+  private async handleSemanticSearchMemory(args: any) {
+    if (!this.embeddingReady) {
+      throw new Error('Embedding service is not initialized yet. Please wait a moment and try again.');
+    }
+    if (!args || typeof args.query !== 'string') {
+      throw new Error('`query` parameter is required and must be a string');
+    }
+
+    // Generate embedding for the query
+    const queryEmbedding = await this.embeddingService.generateEmbedding(args.query);
+
+    // Prepare search options
+    const options: import('./types/index.js').SemanticSearchOptions = {
+      limit: Math.max(1, Math.min(100, Number(args.limit) || 10)),
+      similarityThreshold: typeof args.similarityThreshold === 'number' ? args.similarityThreshold : 0.5,
+      tags: Array.isArray(args.tags) ? args.tags : undefined,
+      contextFilter: typeof args.contextFilter === 'string' ? args.contextFilter : undefined
+    };
+
+    // Perform semantic search
+    const result = await this.withTimeout<import('./types/index.js').SemanticSearchResult>(
+      this.provider.semanticSearchMemories(queryEmbedding, options)
+    );
+
+    // Format results
+    const text = result.entries.length > 0
+      ? this.formatMemoryEntries(result.entries, 300)
+      : 'No results found.';
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: `Found ${result.entries.length} memories (similarity threshold: ${options.similarityThreshold}):\n\n${text}`
+        }
+      ],
+      data: result.entries
+    };
+  }
+
+  private async handleSemanticSearchDocs(args: any) {
+    if (!this.embeddingReady) {
+      throw new Error('Embedding service is not initialized yet. Please wait a moment and try again.');
+    }
+    if (!args || typeof args.query !== 'string') {
+      throw new Error('`query` parameter is required and must be a string');
+    }
+
+    // Generate embedding for the query
+    const queryEmbedding = await this.embeddingService.generateEmbedding(args.query);
+
+    // Prepare search options
+    const options: import('./types/index.js').SemanticSearchOptions = {
+      limit: Math.max(1, Math.min(100, Number(args.limit) || 10)),
+      similarityThreshold: typeof args.similarityThreshold === 'number' ? args.similarityThreshold : 0.5,
+      tags: Array.isArray(args.tags) ? args.tags : undefined
+    };
+
+    // Perform semantic search
+    const result = await this.withTimeout<import('./types/index.js').DocSemanticSearchResult>(
+      this.provider.semanticSearchDocs(queryEmbedding, options)
+    );
+
+    // Format results
+    const text = result.entries.length > 0
+      ? this.formatDocEntries(result.entries, 300)
+      : 'No results found.';
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: `Found ${result.entries.length} docs (similarity threshold: ${options.similarityThreshold}):\n\n${text}`
+        }
+      ],
+      data: result.entries
+    };
   }
 
   private setupHttpFallback(): void {

@@ -9,6 +9,7 @@ export interface MemoryEntry {
   accessCount: number;
   metadata?: Record<string, any>;
   clusterId?: string;
+  embedding?: number[];
 }
 
 export interface DetailsCluster {
@@ -63,6 +64,7 @@ export interface DocEntry {
   lastFetched: Date;
   accessCount: number;
   metadata?: Record<string, any>;
+  embedding?: number[];
 }
 
 export interface DocSearchOptions {
@@ -114,6 +116,26 @@ export interface ClusterSearchOptions {
   limit?: number;
   sortBy?: 'createdAt' | 'updatedAt' | 'name';
   sortOrder?: 'asc' | 'desc';
+}
+
+export interface SemanticSearchOptions {
+  query?: string; // Optional - used at API level, not needed when embedding is already computed
+  limit?: number;
+  similarityThreshold?: number;
+  tags?: string[];
+  contextFilter?: string;
+}
+
+export interface SemanticSearchResult {
+  entries: Array<MemoryEntry & { similarity: number }>;
+  totalFound: number;
+  searchTime: number;
+}
+
+export interface DocSemanticSearchResult {
+  entries: Array<DocEntry & { similarity: number }>;
+  totalFound: number;
+  searchTime: number;
 }
 
 export { type BaseProvider } from './BaseProvider.js';
