@@ -1,6 +1,5 @@
 import { pipeline, env } from '@xenova/transformers';
 
-// Configuration pour éviter les warnings
 env.allowLocalModels = false;
 env.useBrowserCache = false;
 
@@ -57,13 +56,11 @@ export class EmbeddingService {
     }
 
     try {
-      // Truncate text if too long (max ~512 tokens for most models)
-      const maxLength = 8000; // characters, approximation
+      const maxLength = 8000;
       const truncatedText = text.length > maxLength ? text.slice(0, maxLength) : text;
 
       const output = await this.embedder(truncatedText, { pooling: 'mean', normalize: true });
       
-      // Convert tensor to array
       const embedding = Array.from(output.data) as number[];
       return embedding;
     } catch (error) {
@@ -85,7 +82,6 @@ export class EmbeddingService {
     return embeddings;
   }
 
-  // Calculate cosine similarity between two vectors
   static cosineSimilarity(vecA: number[], vecB: number[]): number {
     if (vecA.length !== vecB.length) {
       throw new Error('Vectors must have the same length');

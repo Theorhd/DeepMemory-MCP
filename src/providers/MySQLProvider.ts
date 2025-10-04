@@ -25,7 +25,6 @@ export class MySQLProvider implements BaseProvider {
     }
 
     if (options.tags && Array.isArray(options.tags) && options.tags.length > 0) {
-      // require every tag to be present
       for (const t of options.tags) {
         whereClauses.push('JSON_CONTAINS(tags, ?)');
         params.push(JSON.stringify(t));
@@ -34,14 +33,12 @@ export class MySQLProvider implements BaseProvider {
 
     const whereSql = whereClauses.length > 0 ? 'WHERE ' + whereClauses.join(' AND ') : '';
 
-    // total count
     const conn = await this.pool.getConnection();
     try {
       const countSql = `SELECT COUNT(*) as total FROM docs ${whereSql}`;
       const [countRows]: any = await conn.query(countSql, params);
       const total = (countRows as any[])[0]?.total || 0;
 
-      // ordering
       let orderSql = 'ORDER BY timestamp DESC';
       const sortBy: any = (options as any).sortBy;
       const order = (options as any).order === 'asc' ? 'ASC' : 'DESC';
@@ -130,7 +127,6 @@ export class MySQLProvider implements BaseProvider {
         )
       `);
 
-      // Docs storage table
       await conn.query(`
         CREATE TABLE IF NOT EXISTS docs (
           id VARCHAR(36) PRIMARY KEY,
