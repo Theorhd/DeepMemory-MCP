@@ -18,3 +18,53 @@ export async function fetchAndExtract(url: string): Promise<{ title?: string; te
 
   return { title, text };
 }
+/**
+ * Crawl and extract text from all pages starting from a base documentation URL.
+ * Limits number of pages to avoid infinite loops.
+ * Only follows links within the same origin.
+ * @param baseUrl The root URL of the documentation.
+ * @param maxPages Maximum number of pages to fetch (default 50).
+ */
+export async function fetchAllPages(baseUrl: string, maxPages: number = 50): Promise<Array<{ url: string; title?: string; text: string }>> {
+  if (!baseUrl || typeof baseUrl !== 'string') throw new Error('Base URL is required');
+  const visited = new Set<string>();
+  const toVisit: string[] = [baseUrl];
+  const pages: Array<{ url: string; title?: string; text: string }> = [];
+  const baseOrigin = new URL(baseUrl).origin;
+  while (toVisit.length > 0 && pages.length < maxPages) {
+    const url = toVisit.shift()!;
+    if (visited.has(url)) continue;
+    visited.add(url);
+    try {
+      // Extract content
+      const { title, text } = await fetchAndExtract(url);
+      pages.push({ url, title, text });
+    } catch (err) {
+      console.error(`Failed to fetch and extract ${url}:`, err);
+      continue;
+    }
+    // Fetch HTML to discover links
+    let html = '';
+    try {
+      const res = await fetch(url, { redirect: 'follow' });
+      if (res.ok) html = await res.text();
+    } catch {
+      continue;
+    }
+    // Find hrefs
+    const hrefs = Array.from(html.matchAll(/href=["']([^"'#]+)["']/gi), m => m[1]);
+    for (const href of hrefs) {
+      try {
+        let absolute = new URL(href, url).toString();
+        // Remove fragment to normalize
+        absolute = absolute.split('#')[0];
+        if (absolute.startsWith(baseOrigin) && !visited.has(absolute) && !toVisit.includes(absolute)) {
+          toVisit.push(absolute);
+        }
+      } catch {
+        // ignore invalid URLs
+      }
+    }
+  }
+  return pages;
+}

@@ -10,7 +10,7 @@ import {
 import { SQLiteProvider } from './providers/SQLiteProvider.js';
 import { MySQLProvider } from './providers/MySQLProvider.js';
 import { EmbeddingService } from './embedding/EmbeddingService.js';
-import { fetchAndExtract } from './docs_search.js';
+import { fetchAndExtract, fetchAllPages } from './docs_search.js';
 import { SearchOptions, MemoryEntry, CreateClusterOptions, UpdateClusterOptions, ClusterSearchOptions, DetailsCluster, ClusterDetail, SearchResult } from './types/index.js';
 import * as path from 'path';
 import { promises as fs } from 'fs';
@@ -886,6 +886,8 @@ export class DeepMemoryServer {
             return await this.handleSemanticSearchMemory(args);
           case 'semantic_search_docs':
             return await this.handleSemanticSearchDocs(args);
+          case 'fetch_all_pages':
+            return await this.handleFetchAllPages(args);
 
           default:
             throw new Error(`Unknown tool: ${name}`);
@@ -1413,6 +1415,34 @@ export class DeepMemoryServer {
         }
       ],
       data: result.entries
+    };
+  }
+
+  // Handler for fetch_all_pages tool
+  private async handleFetchAllPages(args: any) {
+    if (!args || typeof args !== 'object' || typeof args.baseUrl !== 'string') {
+      throw new Error('`baseUrl` parameter is required and must be a string');
+    }
+    const maxPages = typeof args.maxPages === 'number' && args.maxPages > 0 ? args.maxPages : 50;
+    // Crawl and extract
+    const pages = await fetchAllPages(args.baseUrl, maxPages);
+    // Store each page in docs storage
+    const storedDocs: any[] = [];
+    for (const p of pages) {
+      try {
+        const doc = await this.withTimeout(
+          this.provider.addDoc({ url: p.url, title: p.title, content: p.text, tags: [], metadata: {} })
+        );
+        storedDocs.push(doc);
+      } catch (err) {
+        console.error(`Failed to store doc for ${p.url}:`, err);
+      }
+    }
+    // Format summary text
+    const text = storedDocs.map(e => `${e.url}${e.title ? ' - ' + e.title : ''}\n${e.content.slice(0,200)}...\n---`).join('\n');
+    return {
+      content: [ { type: 'text', text: `Fetched and stored ${storedDocs.length} pages from ${args.baseUrl}:\n\n${text}` } ],
+      data: storedDocs
     };
   }
 
