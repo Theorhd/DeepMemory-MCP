@@ -1,10 +1,20 @@
 # DeepMemory MCP
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-![version](https://img.shields.io/badge/version-1.2.0-blue.svg)
+![version](https://img.shields.io/badge/version-1.2.1-blue.svg)
 ![node](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)
 
 ## Changelog
+
+### v1.2.1 — chiffrement des données sensibles (--use-crypto)
+
+- **Nouveau flag CLI `--use-crypto`** : active le chiffrement de bout en bout pour toutes les mémoires stockées.
+- **Génération et gestion automatique des clés RSA** : au premier démarrage avec `--use-crypto`, génère une paire de clés RSA 2048 bits et les sauvegarde dans `~/.deepmemory/keys/`. Les clés sont automatiquement rechargées aux démarrages suivants.
+- **Chiffrement hybride RSA+AES** : utilise `encryptJSON` pour chiffrer les contenus volumineux (combinaison RSA pour la clé symétrique et AES-256-CBC pour les données).
+- **Migration automatique des données existantes** : au démarrage avec `--use-crypto`, tous les souvenirs non chiffrés en base sont automatiquement chiffrés et marqués avec `metadata.encrypted`.
+- **Déchiffrement transparent** : les handlers de lecture (`search_memory`, `get_memories`, `load_all_memory`, etc.) déchiffrent automatiquement le contenu avant de le retourner.
+- **Support MySQL** : méthode `updateMemories` implémentée dans `MySQLProvider` pour permettre la migration de chiffrement sur bases MySQL.
+- **Package cryptojs-secure** : intégration du package `cryptojs-secure` (v0.1.2) pour la cryptographie asymétrique, avec corrections ESM dans les imports internes.
 
 ### v1.2.0 — recherche sémantique et migrations
 
@@ -98,7 +108,9 @@ It stores memories locally in an SQLite database by default and exposes a set of
 - MCP tools to add/search/list/update/delete memories
 - Clusters to group structured details and link memories to a subject
 - MCP tools to add/search/list/update/delete development docs (`add_doc`, `search_docs`, `get_docs`, `load_all_docs`, `delete_docs`, `update_docs`)
-  
+- **End-to-end encryption with `--use-crypto`**: protect sensitive memories with RSA+AES hybrid encryption
+- **Automatic key management**: RSA key pairs generated and stored in `~/.deepmemory/keys/`
+- **Transparent encryption/decryption**: memories are encrypted on write and decrypted on read
 - Semantic search capabilities: MCP tools `semantic_search_memory` and `semantic_search_docs` for AI-driven similarity search on memories and docs.
 - Embedding management: automatic generation, storage, and persistence of embeddings for all entries.
 - Schema migration: automatic addition of `embedding` columns and backfill of embeddings in existing SQLite/MySQL databases.
@@ -153,10 +165,22 @@ Start with default SQLite:
 node "./dist/index.js"
 ```
 
+Start with encryption enabled (RSA+AES):
+
+```powershell
+node "./dist/index.js" --use-crypto
+```
+
 Start with MySQL (no password):
 
 ```powershell
 node "./dist/index.js" --mysql --mysql_host localhost --mysql_id root --mysql_db deepmemory
+```
+
+Start with MySQL and encryption:
+
+```powershell
+node "./dist/index.js" --mysql --mysql_host localhost --mysql_id root --mysql_db deepmemory --use-crypto
 ```
 
 Start with MySQL (with password):
@@ -214,8 +238,11 @@ Configurez le port via :
 
 - Database file (SQLite): `~/.deepmemory/deepmemory.db`
 - Queue file: `~/.deepmemory/queue.jsonl`
+- Encryption keys (when using `--use-crypto`): `~/.deepmemory/keys/private.pem` and `~/.deepmemory/keys/public.pem`
 
 Les fichiers sont créés automatiquement dans le répertoire home de l'utilisateur.
+
+**Note sur le chiffrement** : les clés RSA sont générées au premier démarrage avec `--use-crypto` et réutilisées aux démarrages suivants. Conservez ces clés en sécurité : sans elles, les données chiffrées ne peuvent pas être déchiffrées.
 
 ## Environment variables
 
