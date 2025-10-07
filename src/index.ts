@@ -8,6 +8,8 @@ import {
   CallToolRequest,
 } from "@modelcontextprotocol/sdk/types.js";
 import { SQLiteProvider } from './providers/SQLiteProvider.js';
+// Import CryptoJs from the main package entry point
+import { CryptoJs } from 'cryptojs-secure';
 import { MySQLProvider } from './providers/MySQLProvider.js';
 import { EmbeddingService } from './embedding/EmbeddingService.js';
 import { fetchAndExtract, fetchAllPages } from './docs_search.js';
@@ -24,7 +26,7 @@ declare global {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const version = "1.2.0";
+const version = "1.2.1";
 
 export class DeepMemoryServer {
   private server: Server;
@@ -37,6 +39,8 @@ export class DeepMemoryServer {
   private httpPort: number;
   private httpServer: http.Server | null = null;
   private queueProcessing = false;
+  private cryptoService?: CryptoJs;
+  private useCrypto: boolean = false;
 
   private withTimeout<T>(p: Promise<T>, ms?: number): Promise<T> {
     const timeout = ms ?? this.requestTimeoutMs;
@@ -181,11 +185,23 @@ export class DeepMemoryServer {
 
   private async handleGetMemoriesByCluster(args: any) {
     if (!args || typeof args.clusterId !== 'string') throw new Error('`clusterId` is required');
-  const entries = await this.withTimeout<MemoryEntry[]>(this.provider.getMemoriesByCluster(args.clusterId));
+  let entries = await this.withTimeout<MemoryEntry[]>(this.provider.getMemoriesByCluster(args.clusterId));
+    // Decrypt if necessary
+    if (this.useCrypto && this.cryptoService) {
+      entries = entries.map(e => {
+        if (e.metadata?.encrypted) {
+          try { 
+            const decrypted = this.cryptoService!.decryptJSON(e.content) as { data: string };
+            e.content = decrypted.data;
+          } catch (err) { console.error('Failed to decrypt memory:', err); }
+        }
+        return e;
+      });
+    }
     return { content: [ { type: 'text', text: `Found ${entries.length} memories in cluster` } ], data: entries };
   }
 
-  constructor(provider?: any) {
+  constructor(provider?: any, cryptoService?: CryptoJs) {
     this.server = new Server(
       {
         name: "deepmemory-mcp",
@@ -213,8 +229,11 @@ export class DeepMemoryServer {
     this.httpPort = Number(process.env.DEEP_MEMORY_HTTP_PORT) || 6789;
 
     // Initialize embedding service
-    this.embeddingService = EmbeddingService.getInstance();
+  this.embeddingService = EmbeddingService.getInstance();
     this.initializeEmbedding();
+  // Crypto service for encryption-enabled mode
+  this.cryptoService = cryptoService;
+  this.useCrypto = !!cryptoService;
 
     this.setupTools();
     this.setupHandlers();
@@ -228,6 +247,45 @@ export class DeepMemoryServer {
     } catch (error) {
       console.error('Failed to initialize embedding service:', error);
       this.embeddingReady = false;
+    }
+  }
+  
+  // Initialize crypto keys and encrypt existing memories if needed
+  private async initializeCrypto(): Promise<void> {
+    if (!this.cryptoService) return;
+    try {
+      const userHome = os.homedir();
+      const deepMemoryDir = path.join(userHome, '.deepmemory');
+      const keysDir = path.join(deepMemoryDir, 'keys');
+      // ensure key directory exists
+      await fs.mkdir(keysDir, { recursive: true });
+      const privKeyPath = path.join(keysDir, 'private.pem');
+      try {
+        // try loading existing keys
+        await fs.access(privKeyPath);
+        await this.cryptoService.loadKeys(keysDir);
+        console.error('Loaded existing RSA key pair');
+      } catch {
+        // no existing keys, generate and save
+        this.cryptoService.generateKeys(2048);
+        await this.cryptoService.saveKeys(keysDir);
+        console.error('Generated and saved new RSA key pair');
+      }
+      // encrypt existing unencrypted memories
+      const all = await this.provider.getAllMemories();
+      let count = 0;
+      for (const mem of all) {
+        if (!mem.metadata || !mem.metadata.encrypted) {
+          // Use hybrid RSA+AES encryption for large content
+          const cipher = this.cryptoService.encryptJSON({ data: mem.content });
+          const newMeta = { ...(mem.metadata || {}), encrypted: true };
+          await this.provider.updateMemories({ id: mem.id, update: { content: cipher, metadata: newMeta } });
+          count++;
+        }
+      }
+      console.error(`Encrypted ${count} existing memories`);
+    } catch (err) {
+      console.error('Crypto initialization error:', err);
     }
   }
 
@@ -928,6 +986,19 @@ export class DeepMemoryServer {
       throw new Error('Importance must be a number between 1 and 10');
     }
 
+    // Optionally encrypt content if crypto enabled
+    let contentToStore = content.trim();
+    const meta = metadata || {};
+    if (this.useCrypto && this.cryptoService) {
+      try {
+        // Use JSON encryption for large content (hybrid RSA+AES)
+        const encrypted = this.cryptoService.encryptJSON({ data: contentToStore });
+        contentToStore = encrypted;
+        meta.encrypted = true;
+      } catch (err) {
+        console.error('Failed to encrypt memory content:', err);
+      }
+    }
     // Generate embedding if service is ready
     let embedding: number[] | undefined;
     if (this.embeddingReady) {
@@ -941,11 +1012,11 @@ export class DeepMemoryServer {
 
     const entry = await this.withTimeout<MemoryEntry>(
       this.provider.addMemory({
-        content: content.trim(),
+        content: contentToStore,
         tags: tags.filter(tag => typeof tag === 'string' && tag.trim().length > 0),
         context: String(context).trim(),
         importance: validImportance,
-        metadata: metadata || {},
+        metadata: meta,
         embedding
       })
     );
@@ -996,9 +1067,21 @@ export class DeepMemoryServer {
       sortOrder: args.sort_order || 'desc'
     };
 
-    const result = await this.withTimeout<SearchResult>(
+    let result = await this.withTimeout<SearchResult>(
       this.provider.searchMemories(options)
     );
+    // Decrypt entries if crypto mode enabled
+    if (this.useCrypto && this.cryptoService) {
+      result.entries = result.entries.map(e => {
+        if (e.metadata?.encrypted) {
+          try { 
+            const decrypted = this.cryptoService!.decryptJSON(e.content) as { data: string };
+            e.content = decrypted.data;
+          } catch (err) { console.error('Failed to decrypt memory:', err); }
+        }
+        return e;
+      });
+    }
 
     if (result.entries.length === 0) {
       return {
@@ -1026,9 +1109,21 @@ export class DeepMemoryServer {
   private async handleGetMemories(args: any) {
     const limit = Math.max(1, Math.min(100, Number(args.limit) || 20));
     
-    const entries = await this.withTimeout<MemoryEntry[]>(
+    let entries = await this.withTimeout<MemoryEntry[]>(
       this.provider.getRecentMemories(limit)
     );
+    // Decrypt if necessary
+    if (this.useCrypto && this.cryptoService) {
+      entries = entries.map(e => {
+        if (e.metadata?.encrypted) {
+          try { 
+            const decrypted = this.cryptoService!.decryptJSON(e.content) as { data: string };
+            e.content = decrypted.data;
+          } catch (err) { console.error('Failed to decrypt memory:', err); }
+        }
+        return e;
+      });
+    }
 
     if (entries.length === 0) {
       return {
@@ -1151,9 +1246,21 @@ export class DeepMemoryServer {
   }
 
   private async handleLoadAllMemory() {
-    const entries = await this.withTimeout<MemoryEntry[]>(
+    let entries = await this.withTimeout<MemoryEntry[]>(
       this.provider.getAllMemories()
     );
+    // Decrypt if necessary
+    if (this.useCrypto && this.cryptoService) {
+      entries = entries.map(e => {
+        if (e.metadata?.encrypted) {
+          try { 
+            const decrypted = this.cryptoService!.decryptJSON(e.content) as { data: string };
+            e.content = decrypted.data;
+          } catch (err) { console.error('Failed to decrypt memory:', err); }
+        }
+        return e;
+      });
+    }
 
     if (entries.length === 0) {
       return {
@@ -1509,18 +1616,21 @@ export class DeepMemoryServer {
   async run(): Promise<void> {
     try {
       console.error("Starting DeepMemory MCP Server...");
-      
-  await this.withTimeout<void>(this.provider.initialize(), 30000);
-  this.providerReady = true;
-  console.error("Storage provider initialized");
-
+      // Initialize storage provider
+      await this.withTimeout<void>(this.provider.initialize(), 30000);
+      this.providerReady = true;
+      console.error("Storage provider initialized");
+      // Initialize crypto (generate keys and encrypt existing memories) if enabled
+      if (this.useCrypto) {
+        await this.initializeCrypto();
+      }
+      // Drain any queued operations
       await this.drainQueue();
-
+      // Setup HTTP fallback
       this.setupHttpFallback();
-
+      // Connect transport
       const transport = new StdioServerTransport();
       await this.server.connect(transport);
-      
       console.error("DeepMemory MCP Server running");
     } catch (error) {
       console.error("Failed to start server:", error);
@@ -1582,6 +1692,13 @@ if (isMainModule) {
   };
 
   let providerInstance: any = undefined;
+  // Check for crypto mode
+  const useCrypto = hasFlag('--use-crypto');
+  let cryptoService: CryptoJs | undefined;
+  if (useCrypto) {
+    cryptoService = new CryptoJs();
+    console.error('Crypto mode enabled: messages will be encrypted');
+  }
 
   if (hasFlag('--mysql')) {
     const host = getFlag('--mysql_host') || process.env.MYSQL_HOST || 'localhost';
@@ -1601,7 +1718,7 @@ if (isMainModule) {
     console.error('Using MySQL provider with host=' + host + ' user=' + user + ' db=' + database + ' (password ' + (password ? 'provided' : 'not provided') + ')');
   }
 
-  const server = new DeepMemoryServer(providerInstance);
+  const server = new DeepMemoryServer(providerInstance, cryptoService);
   globalThis.deepMemoryServer = server;
   server.run().catch(console.error);
 }

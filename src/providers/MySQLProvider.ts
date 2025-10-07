@@ -340,7 +340,37 @@ export class MySQLProvider implements BaseProvider {
   async getAllMemories(): Promise<MemoryEntry[]> { throw new Error('Not implemented in MySQLProvider'); }
   async getStats(): Promise<{ totalEntries: number; lastModified: Date | null; totalClusters: number }> { throw new Error('Not implemented in MySQLProvider'); }
   async deleteMemories(options: any): Promise<number> { throw new Error('Not implemented in MySQLProvider'); }
-  async updateMemories(options: any): Promise<number> { throw new Error('Not implemented in MySQLProvider'); }
+  async updateMemories(options: any): Promise<number> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const conn = await this.pool.getConnection();
+    try {
+      // Only supports updating by id
+      const id: string | undefined = options.id;
+      const update = options.update || {};
+      if (!id) {
+        throw new Error('MySQLProvider.updateMemories requires id for update');
+      }
+      const fields: string[] = [];
+      const params: any[] = [];
+      if (typeof update.content === 'string') {
+        fields.push('content = ?');
+        params.push(update.content);
+      }
+      if (update.metadata !== undefined) {
+        fields.push('metadata = ?');
+        params.push(JSON.stringify(update.metadata));
+      }
+      if (fields.length === 0) {
+        return 0;
+      }
+      params.push(id);
+      const sql = `UPDATE memories SET ${fields.join(', ')} WHERE id = ?`;
+      const [result]: any = await conn.query(sql, params);
+      return result.affectedRows || 0;
+    } finally {
+      conn.release();
+    }
+  }
   async updateCluster(clusterId: string, options: UpdateClusterOptions): Promise<DetailsCluster | null> { throw new Error('Not implemented in MySQLProvider'); }
   async updateClusterDetail(detailId: string, update: any): Promise<ClusterDetail | null> { throw new Error('Not implemented in MySQLProvider'); }
   async deleteClusterDetail(detailId: string): Promise<number> { throw new Error('Not implemented in MySQLProvider'); }
