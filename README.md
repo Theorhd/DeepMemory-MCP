@@ -1,10 +1,20 @@
 # DeepMemory MCP
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-![version](https://img.shields.io/badge/version-1.2.1-blue.svg)
+![version](https://img.shields.io/badge/version-1.2.2-blue.svg)
 ![node](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)
 
 ## Changelog
+
+### v1.2.2 — optimisations et refactorisation du code d'encryption
+
+- **Refactorisation complète du système d'encryption** : ajout de méthodes helper centralisées `decryptContent()` et `encryptContent()` pour éliminer la duplication de code à travers les 11+ handlers.
+- **Correction de bug critique** : `handleUpdateClusterDetail` n'encryptait pas les valeurs lors de la mise à jour - maintenant corrigé pour garantir la cohérence du chiffrement.
+- **Amélioration de `handleUpdateMemory`** : support complet de l'encryption lors de la mise à jour du contenu des mémoires avec gestion automatique des métadonnées d'encryption.
+- **Gestion d'erreur unifiée** : comportement cohérent lors des échecs de décryptage à travers tous les handlers (fallback gracieux avec logging).
+- **Optimisation du backfill** : utilisation des méthodes helper pour l'encryption automatique des données existantes, garantissant une cohérence avec le reste du code.
+- **Code plus maintenable** : réduction de ~150 lignes de code dupliqué, facilitant les futures évolutions et corrections de bugs.
+- **Garantie de sécurité** : toutes les opérations de lecture/écriture passent désormais par les mêmes fonctions d'encryption/decryption, éliminant les risques d'oubli.
 
 ### v1.2.1 — chiffrement des données sensibles (--use-crypto)
 
